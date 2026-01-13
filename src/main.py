@@ -435,49 +435,76 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
         transform=transform
     )
     
-    # Get model (prefer edited if available)
-    if edited_model is not None:
-        model = edited_model
-        print("Evaluating EDITED model")
-    else:
-        # Try to load edited model
-        edited_path = Path(args.checkpoint_dir) / "vit_pathmnist_edited.pt"
-        if edited_path.exists():
-            print(f"Loading edited model from {edited_path}")
-            checkpoint = torch.load(edited_path, map_location=device)
-            trainer.model.load_state_dict(checkpoint['model_state_dict'])
-            model = trainer.model
-        else:
-            model = trainer.model
-            print("Evaluating FINE-TUNED model (no edits found)")
-    
     # Evaluate on HELD-OUT set (critical: this is the only valid evaluation)
     print("\n>>> EVALUATING ON HELD-OUT VALIDATION SET <<<")
     print(">>> This set was strictly excluded from training and editing <<<\n")
-    
+
+    edited_path = Path(args.checkpoint_dir) / "vit_pathmnist_edited.pt"
+    finetuned_path = Path(args.checkpoint_dir) / "vit_pathmnist_finetuned.pt"
+
+    # Case A: have both edited and finetuned checkpoints -> compare before/after
+    if edited_path.exists() and finetuned_path.exists():
+        print("Detected both edited and fine-tuned checkpoints; running BEFORE vs AFTER comparison...")
+
+        # Load baseline (before edit)
+        baseline_trainer = Trainer(checkpoint_dir=args.checkpoint_dir, log_dir=args.log_dir)
+        baseline_trainer.setup_model()
+        baseline_trainer.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
+        model_before = baseline_trainer.model
+
+        # Load edited model
+        edited_trainer = Trainer(checkpoint_dir=args.checkpoint_dir, log_dir=args.log_dir)
+        edited_trainer.setup_model()
+        checkpoint = torch.load(edited_path, map_location=device)
+        edited_trainer.model.load_state_dict(checkpoint['model_state_dict'])
+        model_after = edited_trainer.model
+
+        evaluate_before_after(
+            model_before=model_before,
+            model_after=model_after,
+            dataloader=dataloaders['held_out'],
+            device=device,
+            results_dir=args.results_dir
+        )
+
+        return None
+
+    # Case B: only edited model provided
+    if edited_model is not None:
+        model = edited_model
+        print("Evaluating EDITED model (in-memory)")
+    elif edited_path.exists():
+        print(f"Loading edited model from {edited_path}")
+        checkpoint = torch.load(edited_path, map_location=device)
+        trainer.model.load_state_dict(checkpoint['model_state_dict'])
+        model = trainer.model
+    else:
+        model = trainer.model
+        print("Evaluating FINE-TUNED model (no edits found)")
+
     evaluator = Evaluator(
         model=model,
         device=device,
         results_dir=args.results_dir,
         log_dir=args.log_dir
     )
-    
+
     evaluator.run_inference(dataloaders['held_out'], desc="Held-Out Eval")
-    
+
     # Generate reports
     evaluator.print_summary()
     evaluator.export_confusion_matrix()
     evaluator.export_evaluation_report()
     evaluator.export_predictions()
-    
+
     try:
         evaluator.plot_confusion_matrix()
     except Exception as e:
         print(f"Warning: Could not plot confusion matrix: {e}")
-    
+
     print(f"\n✓ Evaluation complete!")
     print(f"  Results saved to: {args.results_dir}/")
-    
+
     return evaluator
 
 

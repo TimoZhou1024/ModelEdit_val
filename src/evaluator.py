@@ -510,8 +510,8 @@ def evaluate_before_after(
     
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Evaluate before
+
+    # Evaluate BEFORE editing
     print("\n=== Evaluating BEFORE editing ===")
     eval_before = Evaluator(model_before, device, results_dir / "before")
     eval_before.run_inference(dataloader, desc="Before")
@@ -519,8 +519,8 @@ def evaluate_before_after(
     eval_before.export_confusion_matrix("confusion_matrix_before.csv")
     eval_before.export_evaluation_report("evaluation_before.csv")
     eval_before.print_summary()
-    
-    # Evaluate after
+
+    # Evaluate AFTER editing
     print("\n=== Evaluating AFTER editing ===")
     eval_after = Evaluator(model_after, device, results_dir / "after")
     eval_after.run_inference(dataloader, desc="After")
@@ -528,30 +528,43 @@ def evaluate_before_after(
     eval_after.export_confusion_matrix("confusion_matrix_after.csv")
     eval_after.export_evaluation_report("evaluation_after.csv")
     eval_after.print_summary()
-    
-    # Comparison
+
+    # Comparison with multiple success criteria
     comparison = {
         'accuracy_before': metrics_before['accuracy'],
         'accuracy_after': metrics_after['accuracy'],
         'accuracy_change': metrics_after['accuracy'] - metrics_before['accuracy'],
+        'macro_f1_before': metrics_before['macro']['f1'],
+        'macro_f1_after': metrics_after['macro']['f1'],
+        'macro_f1_change': metrics_after['macro']['f1'] - metrics_before['macro']['f1'],
         'errors_before': metrics_before['num_errors'],
         'errors_after': metrics_after['num_errors'],
         'errors_fixed': metrics_before['num_errors'] - metrics_after['num_errors']
     }
-    
+
     # Export comparison
     df = pd.DataFrame([comparison])
     df.to_csv(results_dir / "comparison.csv", index=False)
-    
+
+    # Terminal summary for quick judgment of edit success
     print("\n" + "=" * 70)
-    print("COMPARISON SUMMARY")
+    print("EDIT SUCCESS CHECKLIST")
     print("=" * 70)
     print(f"Accuracy: {comparison['accuracy_before']*100:.2f}% → {comparison['accuracy_after']*100:.2f}% "
           f"({comparison['accuracy_change']*100:+.2f}%)")
+    print(f"Macro-F1: {comparison['macro_f1_before']:.4f} → {comparison['macro_f1_after']:.4f} "
+          f"({comparison['macro_f1_change']:+.4f})")
     print(f"Errors: {comparison['errors_before']} → {comparison['errors_after']} "
           f"({comparison['errors_fixed']:+d} fixed)")
+
+    # Highlight pass/fail style indicators
+    print("\nJudgment Indicators:")
+    print("  • Accuracy improvement    : " + ("PASS" if comparison['accuracy_change'] > 0 else "CHECK"))
+    print("  • Macro-F1 improvement    : " + ("PASS" if comparison['macro_f1_change'] > 0 else "CHECK"))
+    print("  • Errors reduced          : " + ("PASS" if comparison['errors_fixed'] > 0 else "CHECK"))
+    print("  • No regression (errors)  : " + ("PASS" if comparison['errors_after'] <= comparison['errors_before'] else "CHECK"))
     print("=" * 70)
-    
+
     return comparison
 
 
