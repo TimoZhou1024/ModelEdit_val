@@ -1,0 +1,204 @@
+# ============================================
+# ViT Model Editing Pipeline - .gitignore
+# ============================================
+
+# --------------------------------------------
+# Python
+# --------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --------------------------------------------
+# Virtual Environments
+# --------------------------------------------
+.venv/
+venv/
+ENV/
+env/
+.env/
+
+# --------------------------------------------
+# uv Package Manager
+# --------------------------------------------
+uv.lock
+
+# --------------------------------------------
+# PyTorch / Deep Learning
+# --------------------------------------------
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.onnx
+
+# Model checkpoints directory
+checkpoints/
+
+# --------------------------------------------
+# Project Output Directories
+# --------------------------------------------
+# Logs
+logs/
+*.log
+
+# Results
+results/
+
+# Temporary files
+temp/
+tmp/
+
+# --------------------------------------------
+# Data Files
+# --------------------------------------------
+*.npz
+*.npy
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.parquet
+*.csv
+!logs/.gitkeep
+!results/.gitkeep
+
+# Large datasets
+data/
+datasets/
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+*.7z
+
+# --------------------------------------------
+# Jupyter Notebooks
+# --------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# --------------------------------------------
+# IDE / Editors
+# --------------------------------------------
+# VS Code
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+
+# --------------------------------------------
+# Operating System
+# --------------------------------------------
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# --------------------------------------------
+# Testing / Coverage
+# --------------------------------------------
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# --------------------------------------------
+# Documentation
+# --------------------------------------------
+docs/_build/
+site/
+
+# --------------------------------------------
+# Misc
+# --------------------------------------------
+*.bak
+*.tmp
+*.temp
+*.orig
+*.rej
+*.diff
+*.patch
+
+# Secrets / Credentials
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets.yaml
+secrets.yml
+
+# --------------------------------------------
+# Reference folder (large, can be re-cloned)
+# --------------------------------------------
+# Uncomment if you want to ignore reference implementations
+# reference/
