@@ -14,6 +14,7 @@ import argparse
 import sys
 import os
 from pathlib import Path
+from datetime import datetime
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -117,8 +118,25 @@ Examples:
         "--edit-layers",
         type=int,
         nargs="+",
-        default=[9, 10, 11],
-        help="Layers to edit (default: 9 10 11)"
+        default=None,
+        help="Layers to edit (default: use ASTRA results or [9,10,11])"
+    )
+    parser.add_argument(
+        "--num-edit-layers",
+        type=int,
+        default=3,
+        help="Number of layers to edit when using ASTRA results (default: 3)"
+    )
+    parser.add_argument(
+        "--use-astra-layers",
+        action="store_true",
+        default=True,
+        help="Use ASTRA causal tracing results to select edit layers (default: True)"
+    )
+    parser.add_argument(
+        "--no-astra-layers",
+        action="store_true",
+        help="Disable ASTRA layer selection, use --edit-layers or default [9,10,11]"
     )
     parser.add_argument(
         "--max-edits",
@@ -146,7 +164,18 @@ Examples:
         default="results",
         help="Results directory (default: results)"
     )
-    
+    parser.add_argument(
+        "--timestamp",
+        action="store_true",
+        help="Add timestamp to log and results directories (preserves each run)"
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Custom name for this run (used instead of timestamp)"
+    )
+
     return parser.parse_args()
 
 
@@ -309,14 +338,28 @@ def run_locate_stage(args, trainer=None, data_handler=None):
     return locator, misclassified
 
 
-def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None):
+def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, astra_layers=None):
     """Stage 4: Apply AlphaEdit weight edits."""
     print("\n" + "=" * 70)
     print("STAGE 4: WEIGHT EDITING (AlphaEdit)")
     print("=" * 70)
-    
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
+    # Determine which layers to edit
+    if args.edit_layers is not None:
+        # User explicitly specified layers
+        edit_layers = args.edit_layers
+        print(f"Using user-specified layers: {edit_layers}")
+    elif not args.no_astra_layers and astra_layers is not None:
+        # Use ASTRA results
+        edit_layers = astra_layers[:args.num_edit_layers]
+        print(f"Using ASTRA-selected layers (top {args.num_edit_layers}): {edit_layers}")
+    else:
+        # Default fallback
+        edit_layers = [9, 10, 11]
+        print(f"Using default layers: {edit_layers}")
+
     # Get data handler
     if data_handler is None:
         data_handler = DataHandler(
@@ -327,19 +370,19 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None):
         )
         data_handler.load_data()
         data_handler.create_held_out_split()
-    
+
     # Get trainer/model
     if trainer is None:
         trainer = Trainer(checkpoint_dir=args.checkpoint_dir, log_dir=args.log_dir)
         trainer.setup_model()
         trainer.load_checkpoint()
-    
+
     transform = trainer.get_transforms()
     dataloaders = data_handler.get_dataloaders(
         batch_size=args.batch_size,
         transform=transform
     )
-    
+
     # Find misclassified if not provided
     if misclassified is None:
         print("\nFinding misclassified samples...")
@@ -347,14 +390,14 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None):
             dataloaders['train'],
             max_samples=args.max_edits
         )
-    
+
     if len(misclassified['indices']) == 0:
         print("No misclassified samples to edit!")
         return trainer
-    
-    # Setup hyperparameters
+
+    # Setup hyperparameters with determined layers
     hparams = AlphaEditHyperParams(
-        layers=args.edit_layers,
+        layers=edit_layers,
         v_num_grad_steps=25,
         v_lr=0.1,
         L2=1e-4
@@ -537,9 +580,15 @@ def run_full_pipeline(args):
     
     # Stage 3: Localization
     locator, misclassified = run_locate_stage(args, trainer, data_handler)
-    
-    # Stage 4: Editing
-    editor = run_edit_stage(args, trainer, data_handler, misclassified)
+
+    # Get ASTRA-determined layers for editing
+    astra_layers = None
+    if locator is not None:
+        astra_layers = locator.get_top_layers(n=args.num_edit_layers)
+        print(f"\nASTRA top {args.num_edit_layers} layers: {astra_layers}")
+
+    # Stage 4: Editing (pass ASTRA layers)
+    editor = run_edit_stage(args, trainer, data_handler, misclassified, astra_layers=astra_layers)
     
     # Stage 5: Evaluation
     evaluator = run_eval_stage(args, trainer, data_handler, editor.model if editor else None)
@@ -556,12 +605,25 @@ def run_full_pipeline(args):
 def main():
     """Main entry point."""
     args = parse_args()
-    
+
+    # Apply timestamp or run name to output directories
+    if args.run_name:
+        suffix = args.run_name
+    elif args.timestamp:
+        suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+    else:
+        suffix = None
+
+    if suffix:
+        args.log_dir = f"{args.log_dir}/{suffix}"
+        args.results_dir = f"{args.results_dir}/{suffix}"
+        print(f"Run identifier: {suffix}")
+
     # Create output directories
     Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     Path(args.results_dir).mkdir(parents=True, exist_ok=True)
-    
+
     # Set random seeds
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
