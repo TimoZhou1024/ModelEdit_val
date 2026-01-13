@@ -280,7 +280,7 @@ def run_locate_stage(args, trainer=None, data_handler=None):
         model=trainer.model,
         device=device,
         log_dir=args.log_dir,
-        target_layers=list(range(12))  # Analyze all layers
+        num_layers=12  # Analyze all layers
     )
     
     # Analyze samples
@@ -295,7 +295,7 @@ def run_locate_stage(args, trainer=None, data_handler=None):
             true_label=label,
             predicted_label=pred,
             sample_idx=idx,
-            num_ablations=args.num_ablations
+            samples=args.num_ablations
         )
     
     # Export and visualize
@@ -513,12 +513,27 @@ def run_full_pipeline(args):
     print("\n" + "=" * 70)
     print("RUNNING COMPLETE PIPELINE")
     print("=" * 70)
-    
+
     # Stage 1: Data
     data_handler = run_data_stage(args)
-    
-    # Stage 2: Training
-    trainer = run_train_stage(args, data_handler)
+
+    # Stage 2: Training (skip if checkpoint exists)
+    checkpoint_path = Path(args.checkpoint_dir) / "vit_pathmnist_finetuned.pt"
+    if checkpoint_path.exists():
+        print("\n" + "=" * 70)
+        print("STAGE 2: FINE-TUNING (SKIPPED - checkpoint found)")
+        print("=" * 70)
+        print(f"Loading existing checkpoint: {checkpoint_path}")
+
+        trainer = Trainer(
+            checkpoint_dir=args.checkpoint_dir,
+            log_dir=args.log_dir
+        )
+        trainer.setup_model()
+        trainer.load_checkpoint(filepath=checkpoint_path, load_optimizer=False)
+        print(f"✓ Loaded model with accuracy: {trainer.best_acc:.2f}%")
+    else:
+        trainer = run_train_stage(args, data_handler)
     
     # Stage 3: Localization
     locator, misclassified = run_locate_stage(args, trainer, data_handler)

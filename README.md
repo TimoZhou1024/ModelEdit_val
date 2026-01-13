@@ -1,12 +1,12 @@
 # ViT Model Editing Pipeline
 
-Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for correcting misclassified samples on MedMNIST (PathMNIST).
+Transfer LLM editing techniques (AlphaEdit) to Vision Transformers for correcting misclassified samples on MedMNIST (PathMNIST).
 
 ## 🎯 Project Goal
 
 1. **Data Splitting**: Rigorously isolate a "Held-Out Validation Set" before any training
 2. **Fine-tuning**: Train `vit-base-patch16-224` on PathMNIST
-3. **Locate Layers**: Adapt ASTRA to identify significant layers for error samples
+3. **Locate Layers**: Use AlphaEdit-style **Causal Tracing** to identify significant layers for error samples
 4. **Edit Weights**: Adapt AlphaEdit to correct these errors
 5. **Evaluate**: Generate Confusion Matrix and Accuracy using the Held-Out set
 
@@ -17,7 +17,7 @@ d:\ModelEdit\
 ├── src/
 │   ├── data_handler.py      # PathMNIST loading & strict train/held-out split
 │   ├── trainer.py           # ViT fine-tuning with auto GPU/CPU + checkpointing
-│   ├── locator.py           # ASTRA-based layer importance scoring
+│   ├── locator.py           # AlphaEdit-style causal tracing for layer importance
 │   ├── editor.py            # AlphaEdit null-space projection editing
 │   ├── evaluator.py         # Evaluation with confusion matrix & reports
 │   └── main.py              # CLI entry point
@@ -27,7 +27,7 @@ d:\ModelEdit\
 ├── logs/
 │   ├── data_split_info.csv          # Dataset split statistics
 │   ├── training_metrics.csv         # Training loss/accuracy per epoch
-│   ├── layer_importance.csv         # Per-sample layer importance scores
+│   ├── causal_trace_results.csv     # Per-sample causal tracing scores
 │   ├── layer_statistics.csv         # Aggregated layer statistics
 │   └── edit_log.csv                 # Weight edit records
 ├── results/
@@ -87,8 +87,8 @@ uv run python src/main.py --stage data
 # Stage 2: Fine-tune ViT (auto GPU/CPU detection)
 uv run python src/main.py --stage train --epochs 10 --batch-size 32
 
-# Stage 3: Locate important layers (ASTRA)
-uv run python src/main.py --stage locate --num-ablations 32
+# Stage 3: Locate important layers (Causal Tracing)
+uv run python src/main.py --stage locate --noise-factor 3.0
 
 # Stage 4: Apply weight edits (AlphaEdit)
 uv run python src/main.py --stage edit --edit-layers 9 10 11 --max-edits 30
@@ -126,11 +126,28 @@ python src/main.py --stage full --epochs 10
 
 ### Stage 3: Layer Localization (`--stage locate`)
 
-Adapts **ASTRA methodology** for ViT:
-- Patch-level ablation study (zero out 14×14 patches)
-- Lasso regression to estimate layer importance
-- Analyzes CLS token activations across all 12 encoder layers
-- Exports: `logs/layer_importance.csv`, `logs/layer_statistics.csv`
+Adapts **AlphaEdit Causal Tracing** methodology for ViT:
+
+**Core Algorithm:**
+1. **Corrupt Input**: Add Gaussian noise to patch embeddings (positions 1-196)
+2. **Run Corrupted Forward**: Observe prediction probability drop
+3. **Restore & Measure**: For each (token, layer) pair, restore clean activations and measure probability recovery
+4. **Importance Score**: Higher recovery = more important layer
+
+**Key Functions (corresponding to AlphaEdit):**
+| locator.py | AlphaEdit/causal_trace.py |
+|------------|---------------------------|
+| `trace_with_patch()` | `trace_with_patch()` |
+| `trace_important_states()` | `trace_important_states()` |
+| `trace_important_window()` | `trace_important_window()` |
+| `collect_embedding_std()` | `collect_embedding_std()` |
+
+**ViT Adaptations:**
+- Token 0 = CLS token (classification), Tokens 1-196 = image patches
+- Default: corrupt all patches, analyze CLS token restoration
+- Noise level auto-calibrated from embedding std (factor × std)
+
+Exports: `logs/causal_trace_results.csv`, `logs/layer_statistics.csv`
 
 ### Stage 4: Weight Editing (`--stage edit`)
 
@@ -160,7 +177,8 @@ Adapts **AlphaEdit** for ViT:
 | `--lr` | 1e-4 | Learning rate |
 | `--edit-layers` | 9 10 11 | Layers to edit |
 | `--max-edits` | 30 | Maximum samples to edit |
-| `--num-ablations` | 32 | Ablations for layer analysis |
+| `--noise-factor` | 3.0 | Noise multiplier for causal tracing |
+| `--trace-samples` | 10 | Number of corrupted samples for averaging |
 | `--seed` | 42 | Random seed |
 
 ## 📐 Technical Details
@@ -189,13 +207,49 @@ Where:
 - $P = \hat{U} \hat{U}^T$ (null-space projection)
 - $K$ = input activations at CLS token position
 
-### ASTRA Importance Scoring
+### Causal Tracing (Adapted from AlphaEdit)
 
-$$\text{Importance}_l = \sum_{i} |w_i^l|$$
+The causal tracing algorithm identifies which layers are most important for a prediction:
 
-Where $w^l$ are Lasso regression coefficients predicting output probability from layer $l$ activations under random patch ablations.
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Causal Tracing Process                        │
+├─────────────────────────────────────────────────────────────────┤
+│ 1. Clean Run:     image → [embed] → [L0] → ... → [L11] → P_high │
+│                                                                  │
+│ 2. Corrupted Run: image → [embed + noise] → ... → P_low         │
+│                           ↑                                      │
+│                    (add Gaussian noise to patch embeddings)      │
+│                                                                  │
+│ 3. Restore Layer: image → [embed + noise] → [L_i restored] → P_i│
+│                                              ↑                   │
+│                         (copy clean activation from run 1)       │
+│                                                                  │
+│ 4. Importance:    score_i = (P_i - P_low) / (P_high - P_low)    │
+│                   (higher = more important for prediction)       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Mathematical Formulation:**
+
+For each layer $l$ and token position $t$:
+$$\text{Importance}(t, l) = \frac{P(\text{restore } h_l^t) - P(\text{corrupted})}{P(\text{clean}) - P(\text{corrupted})}$$
+
+Where:
+- $h_l^t$ = hidden state at layer $l$, token position $t$
+- $P(\cdot)$ = probability of target class
 
 ## 📝 Changelog
+
+### v1.1.0 (2026-01-14)
+- **重构 Locator 模块**: 从 ASTRA 风格的 patch ablation + Lasso 回归改为 AlphaEdit 风格的 **因果追踪 (Causal Tracing)**
+- 新增 `trace_with_patch()`: 对 patch embeddings 添加噪声并恢复特定层激活
+- 新增 `trace_important_states()`: 遍历所有 (token, layer) 组合测量重要性
+- 新增 `trace_important_window()`: 使用滑动窗口分析 attention/MLP 组件
+- 新增 `collect_embedding_std()`: 自动估计噪声水平
+- 新增 `CausalTracer` 类: 封装因果追踪分析
+- 更新 `Locator` 类接口以使用因果追踪
+- 与 AlphaEdit `experiments/causal_trace.py` 方法论对齐
 
 ### v1.0.1 (2026-01-13)
 - 迁移到 **uv** 包管理器
@@ -217,7 +271,8 @@ Where $w^l$ are Lasso regression coefficients predicting output probability from
 ## 🔗 References
 
 - **AlphaEdit**: Null-space projection for knowledge editing without catastrophic forgetting
-- **ASTRA**: Adaptive activation steering for VLM safety
+  - Causal tracing: `experiments/causal_trace.py`
+  - Weight editing: `AlphaEdit/AlphaEdit_main.py`
 - **ViT**: "An Image is Worth 16x16 Words" (Dosovitskiy et al.)
 - **MedMNIST**: Standardized medical image classification benchmark
 
