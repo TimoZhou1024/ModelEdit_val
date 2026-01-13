@@ -144,6 +144,17 @@ Examples:
         default=30,
         help="Max number of samples to edit (default: 30)"
     )
+    parser.add_argument(
+        "--pin-memory",
+        action="store_true",
+        default=None,
+        help="Enable pin_memory for DataLoaders (faster GPU transfer)"
+    )
+    parser.add_argument(
+        "--no-pin-memory",
+        action="store_true",
+        help="Disable pin_memory for DataLoaders"
+    )
     
     # Output arguments
     parser.add_argument(
@@ -244,7 +255,8 @@ def run_train_stage(args, data_handler=None):
     transform = trainer.get_transforms()
     dataloaders = data_handler.get_dataloaders(
         batch_size=args.batch_size,
-        transform=transform
+        transform=transform,
+        pin_memory=args.pin_memory
     )
     
     # Train (on training set only!)
@@ -290,7 +302,8 @@ def run_locate_stage(args, trainer=None, data_handler=None):
     transform = trainer.get_transforms()
     dataloaders = data_handler.get_dataloaders(
         batch_size=args.batch_size,
-        transform=transform
+        transform=transform,
+        pin_memory=args.pin_memory
     )
     
     # Find misclassified samples from training set
@@ -380,7 +393,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
     transform = trainer.get_transforms()
     dataloaders = data_handler.get_dataloaders(
         batch_size=args.batch_size,
-        transform=transform
+        transform=transform,
+        pin_memory=args.pin_memory
     )
 
     # Find misclassified if not provided
@@ -475,7 +489,8 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
     transform = trainer.get_transforms()
     dataloaders = data_handler.get_dataloaders(
         batch_size=args.batch_size,
-        transform=transform
+        transform=transform,
+        pin_memory=args.pin_memory
     )
     
     # Evaluate on HELD-OUT set (critical: this is the only valid evaluation)
@@ -627,6 +642,14 @@ def main():
     # Set random seeds
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+
+    # Resolve pin_memory (None = auto-detect in data_handler)
+    if args.no_pin_memory:
+        args.pin_memory = False
+    elif args.pin_memory:
+        args.pin_memory = True
+    else:
+        args.pin_memory = None  # Auto-detect based on CUDA availability
     
     # Run selected stage
     if args.stage == "data":

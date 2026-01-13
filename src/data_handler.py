@@ -300,47 +300,59 @@ class DataHandler:
         self,
         batch_size: int = 32,
         num_workers: int = 0,
-        transform=None
+        transform=None,
+        pin_memory: bool = None
     ) -> Dict[str, DataLoader]:
         """
         Create DataLoaders for all splits.
-        
+
+        Args:
+            batch_size: Batch size for DataLoaders
+            num_workers: Number of worker processes for data loading
+            transform: Image transforms to apply
+            pin_memory: Pin memory for faster CPU-to-GPU transfer.
+                        If None, auto-detect based on CUDA availability.
+
         Returns:
             Dictionary with keys: 'train', 'held_out', 'val', 'test'
         """
+        # Auto-detect pin_memory based on CUDA availability
+        if pin_memory is None:
+            pin_memory = torch.cuda.is_available()
+
         train_dataset = self.get_train_dataset(transform)
         held_out_dataset = self.get_held_out_dataset(transform)
         val_dataset = self.get_original_val_dataset(transform)
         test_dataset = self.get_original_test_dataset(transform)
-        
+
         return {
             'train': DataLoader(
                 train_dataset,
                 batch_size=batch_size,
                 shuffle=True,
                 num_workers=num_workers,
-                pin_memory=True
+                pin_memory=pin_memory
             ),
             'held_out': DataLoader(
                 held_out_dataset,
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=num_workers,
-                pin_memory=True
+                pin_memory=pin_memory
             ),
             'val': DataLoader(
                 val_dataset,
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=num_workers,
-                pin_memory=True
+                pin_memory=pin_memory
             ),
             'test': DataLoader(
                 test_dataset,
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=num_workers,
-                pin_memory=True
+                pin_memory=pin_memory
             )
         }
 

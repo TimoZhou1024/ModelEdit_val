@@ -175,6 +175,8 @@ Exports: `logs/edit_log.csv`, `checkpoints/vit_pathmnist_edited.pt`
 | `--batch-size` | 32 | Batch size |
 | `--lr` | 1e-4 | Learning rate |
 | `--resume` | False | Resume training from checkpoint |
+| `--pin-memory` | auto | Enable pin_memory for faster CPU-to-GPU transfer |
+| `--no-pin-memory` | False | Disable pin_memory (use when CUDA unavailable) |
 
 ### Layer Localization Options
 | Argument | Default | Description |
