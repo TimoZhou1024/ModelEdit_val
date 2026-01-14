@@ -466,22 +466,46 @@ class Trainer:
     ) -> Dict[str, Any]:
         """
         Find misclassified samples in the dataset.
-        
+
+        IMPORTANT: This function creates a new DataLoader with shuffle=False
+        to ensure that returned indices correspond to dataset's original indices.
+
         Returns:
             Dictionary with indices, predictions, and true labels of errors
         """
-        preds, labels, probs = self.get_predictions(dataloader)
-        
+        # Create a new DataLoader with shuffle=False to ensure index consistency
+        # This is critical: if the original dataloader has shuffle=True,
+        # the iteration order won't match dataset indices
+        dataset = dataloader.dataset
+        unshuffled_loader = DataLoader(
+            dataset,
+            batch_size=dataloader.batch_size,
+            shuffle=False,  # Must be False for correct index mapping
+            num_workers=dataloader.num_workers,
+            pin_memory=dataloader.pin_memory,
+        )
+
+        preds, labels, probs = self.get_predictions(unshuffled_loader)
+
         # Find misclassified
         misclassified_mask = preds != labels
         misclassified_indices = np.where(misclassified_mask)[0]
-        
+
         if max_samples and len(misclassified_indices) > max_samples:
             misclassified_indices = misclassified_indices[:max_samples]
-        
+
         print(f"\nFound {len(misclassified_indices)} misclassified samples")
         print(f"  Error rate: {100.*len(misclassified_indices)/len(labels):.2f}%")
-        
+
+        # Verify index consistency (debug check)
+        if len(misclassified_indices) > 0:
+            sample_idx = misclassified_indices[0]
+            _, dataset_label = dataset[sample_idx]
+            if isinstance(dataset_label, torch.Tensor):
+                dataset_label = dataset_label.item()
+            if dataset_label != labels[sample_idx]:
+                print(f"  WARNING: Index mismatch detected! dataset[{sample_idx}].label={dataset_label}, labels[{sample_idx}]={labels[sample_idx]}")
+
         return {
             'indices': misclassified_indices,
             'predictions': preds[misclassified_indices],
