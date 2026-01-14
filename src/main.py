@@ -26,7 +26,7 @@ from tqdm import tqdm
 from data_handler import DataHandler, PathMNISTDataset
 from trainer import Trainer
 from locator import Locator
-from editor import Editor, AlphaEditHyperParams
+from editor import Editor, AlphaEditHyperParams, HeadEditor, HeadEditHyperParams
 from evaluator import Evaluator, evaluate_before_after
 
 
@@ -115,6 +115,13 @@ Examples:
     
     # Editor arguments
     parser.add_argument(
+        "--edit-method",
+        type=str,
+        choices=["alphaedit", "head"],
+        default="alphaedit",
+        help="Editing method: 'alphaedit' (MLP layers) or 'head' (classifier only)"
+    )
+    parser.add_argument(
         "--edit-layers",
         type=int,
         nargs="+",
@@ -144,6 +151,32 @@ Examples:
         default=30,
         help="Max number of samples to edit (default: 30)"
     )
+
+    # Head editing specific arguments
+    parser.add_argument(
+        "--head-lr",
+        type=float,
+        default=0.01,
+        help="Learning rate for head editing (default: 0.01)"
+    )
+    parser.add_argument(
+        "--head-steps",
+        type=int,
+        default=50,
+        help="Number of optimization steps for head editing (default: 50)"
+    )
+    parser.add_argument(
+        "--ewc-lambda",
+        type=float,
+        default=1000.0,
+        help="EWC regularization strength for head editing (default: 1000.0)"
+    )
+    parser.add_argument(
+        "--closed-form",
+        action="store_true",
+        help="Use closed-form solution for head editing (faster, less precise)"
+    )
+
     parser.add_argument(
         "--pin-memory",
         action="store_true",
@@ -352,26 +385,13 @@ def run_locate_stage(args, trainer=None, data_handler=None):
 
 
 def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, astra_layers=None):
-    """Stage 4: Apply AlphaEdit weight edits."""
+    """Stage 4: Apply weight edits (AlphaEdit or Head Editing)."""
+    method_name = "Head Editing" if args.edit_method == "head" else "AlphaEdit"
     print("\n" + "=" * 70)
-    print("STAGE 4: WEIGHT EDITING (AlphaEdit)")
+    print(f"STAGE 4: WEIGHT EDITING ({method_name})")
     print("=" * 70)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Determine which layers to edit
-    if args.edit_layers is not None:
-        # User explicitly specified layers
-        edit_layers = args.edit_layers
-        print(f"Using user-specified layers: {edit_layers}")
-    elif not args.no_astra_layers and astra_layers is not None:
-        # Use ASTRA results
-        edit_layers = astra_layers[:args.num_edit_layers]
-        print(f"Using ASTRA-selected layers (top {args.num_edit_layers}): {edit_layers}")
-    else:
-        # Default fallback
-        edit_layers = [9, 10, 11]
-        print(f"Using default layers: {edit_layers}")
 
     # Get data handler
     if data_handler is None:
@@ -409,53 +429,122 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         print("No misclassified samples to edit!")
         return trainer
 
-    # Setup hyperparameters with determined layers
-    hparams = AlphaEditHyperParams(
-        layers=edit_layers,
-        v_num_grad_steps=25,
-        v_lr=0.1,
-        L2=1e-4
-    )
-    
-    # Initialize editor
-    editor = Editor(
-        model=trainer.model,
-        device=device,
-        hparams=hparams,
-        log_dir=args.log_dir
-    )
-    
-    # Precompute projection matrices
-    print("\nPrecomputing null-space projections...")
-    editor.precompute_projection(
-        dataloader=dataloaders['train'],
-        num_samples=500
-    )
-    
-    # Apply edits
-    train_dataset = data_handler.get_train_dataset(transform)
-    
-    edit_indices = misclassified['indices'][:args.max_edits]
-    
-    for idx in tqdm(edit_indices, desc="Applying edits"):
-        image, label = train_dataset[idx]
-        image = image.unsqueeze(0)
-        label_tensor = torch.tensor([label])
-        
-        editor.apply_edit(
-            images=image,
-            true_labels=label_tensor,
-            sample_indices=[int(idx)]
+    # Select editing method
+    if args.edit_method == "head":
+        # Head Editing: modify only classifier
+        print(f"\nUsing Head Editing method")
+        print(f"  Learning rate: {args.head_lr}")
+        print(f"  Optimization steps: {args.head_steps}")
+        print(f"  EWC lambda: {args.ewc_lambda}")
+        print(f"  Closed-form: {args.closed_form}")
+
+        hparams = HeadEditHyperParams(
+            num_steps=args.head_steps,
+            lr=args.head_lr,
+            ewc_lambda=args.ewc_lambda,
+            closed_form=args.closed_form
         )
-    
-    # Save edited model
-    editor.export_edit_log()
-    editor.save_edited_model()
-    
-    print(f"\n✓ Weight editing complete!")
-    print(f"  Edited samples: {len(edit_indices)}")
-    print(f"  Edited layers: {args.edit_layers}")
-    
+
+        editor = HeadEditor(
+            model=trainer.model,
+            device=device,
+            hparams=hparams,
+            log_dir=args.log_dir
+        )
+
+        # Compute Fisher information for EWC (skip if using closed-form)
+        if not args.closed_form:
+            print("\nComputing Fisher information for EWC regularization...")
+            editor.compute_fisher_information(
+                dataloader=dataloaders['train'],
+                num_samples=500
+            )
+
+        # Apply batch edit (head editing processes all samples together)
+        train_dataset = data_handler.get_train_dataset(transform)
+        edit_indices = misclassified['indices'][:args.max_edits]
+
+        images_list = []
+        labels_list = []
+        for idx in edit_indices:
+            image, label = train_dataset[idx]
+            images_list.append(image)
+            labels_list.append(label)
+
+        images = torch.stack(images_list)
+        labels = torch.tensor(labels_list)
+
+        print(f"\nApplying head edit to {len(edit_indices)} samples...")
+        editor.apply_edit(
+            images=images,
+            true_labels=labels,
+            sample_indices=[int(i) for i in edit_indices]
+        )
+
+        # Save
+        editor.export_edit_log()
+        editor.save_edited_model()
+
+        print(f"\n✓ Head editing complete!")
+        print(f"  Edited samples: {len(edit_indices)}")
+
+    else:
+        # AlphaEdit: modify MLP layers
+        # Determine which layers to edit
+        if args.edit_layers is not None:
+            edit_layers = args.edit_layers
+            print(f"Using user-specified layers: {edit_layers}")
+        elif not args.no_astra_layers and astra_layers is not None:
+            edit_layers = astra_layers[:args.num_edit_layers]
+            print(f"Using ASTRA-selected layers (top {args.num_edit_layers}): {edit_layers}")
+        else:
+            edit_layers = [9, 10, 11]
+            print(f"Using default layers: {edit_layers}")
+
+        hparams = AlphaEditHyperParams(
+            layers=edit_layers,
+            v_num_grad_steps=25,
+            v_lr=0.1,
+            L2=1e-4
+        )
+
+        editor = Editor(
+            model=trainer.model,
+            device=device,
+            hparams=hparams,
+            log_dir=args.log_dir
+        )
+
+        # Precompute projection matrices
+        print("\nPrecomputing null-space projections...")
+        editor.precompute_projection(
+            dataloader=dataloaders['train'],
+            num_samples=500
+        )
+
+        # Apply edits one by one
+        train_dataset = data_handler.get_train_dataset(transform)
+        edit_indices = misclassified['indices'][:args.max_edits]
+
+        for idx in tqdm(edit_indices, desc="Applying edits"):
+            image, label = train_dataset[idx]
+            image = image.unsqueeze(0)
+            label_tensor = torch.tensor([label])
+
+            editor.apply_edit(
+                images=image,
+                true_labels=label_tensor,
+                sample_indices=[int(idx)]
+            )
+
+        # Save edited model
+        editor.export_edit_log()
+        editor.save_edited_model()
+
+        print(f"\n✓ AlphaEdit complete!")
+        print(f"  Edited samples: {len(edit_indices)}")
+        print(f"  Edited layers: {edit_layers}")
+
     return editor
 
 

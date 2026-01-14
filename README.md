@@ -7,7 +7,7 @@ Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for c
 1. **Data Splitting**: Rigorously isolate a "Held-Out Validation Set" before any training
 2. **Fine-tuning**: Train `vit-base-patch16-224` on PathMNIST
 3. **Locate Layers**: Use **ASTRA-style Causal Tracing** to identify significant layers for error samples
-4. **Edit Weights**: Adapt **AlphaEdit** to correct these errors using null-space projection
+4. **Edit Weights**: Apply **AlphaEdit** (MLP layers) or **Head Editing** (classifier only) to correct errors
 5. **Evaluate**: Generate Confusion Matrix and Accuracy using the Held-Out set
 
 ## Project Structure
@@ -18,20 +18,22 @@ E:\ModelEdit_val\
 │   ├── data_handler.py      # PathMNIST loading & strict train/held-out split
 │   ├── trainer.py           # ViT fine-tuning with auto GPU/CPU + checkpointing
 │   ├── locator.py           # ASTRA-style causal tracing for layer importance
-│   ├── editor.py            # AlphaEdit null-space projection editing
+│   ├── editor.py            # AlphaEdit + HeadEditor implementations
 │   ├── evaluator.py         # Evaluation with confusion matrix & reports
 │   └── main.py              # CLI entry point
 ├── checkpoints/
-│   ├── vit_pathmnist_finetuned.pt   # Fine-tuned model
-│   ├── vit_pathmnist_edited.pt      # Edited model
-│   └── projection_cache.pt          # Cached null-space projections
+│   ├── vit_pathmnist_finetuned.pt      # Fine-tuned model
+│   ├── vit_pathmnist_edited.pt         # AlphaEdit edited model
+│   ├── vit_pathmnist_head_edited.pt    # Head edited model
+│   └── projection_cache.pt             # Cached null-space projections
 ├── logs/
 │   └── {timestamp}/                 # Timestamped run logs
 │       ├── data_split_info.csv      # Dataset split statistics
 │       ├── training_metrics.csv     # Training loss/accuracy per epoch
 │       ├── layer_importance.csv     # Per-sample causal tracing scores
 │       ├── layer_statistics.csv     # Aggregated layer statistics
-│       └── edit_log.csv             # Weight edit records
+│       ├── edit_log.csv             # AlphaEdit records
+│       └── head_edit_log.csv        # Head Editing records
 ├── results/
 │   └── {timestamp}/                 # Timestamped run results
 │       ├── confusion_matrix.csv     # Confusion matrix
@@ -135,6 +137,10 @@ Exports: `logs/layer_importance.csv`, `logs/layer_statistics.csv`
 
 ### Stage 4: Weight Editing (`--stage edit`)
 
+Two editing methods are available:
+
+#### AlphaEdit (default: `--edit-method alphaedit`)
+
 Implements **AlphaEdit** null-space projection for ViT:
 
 1. **Collect K vectors**: Input activations at target layers
@@ -144,7 +150,21 @@ Implements **AlphaEdit** null-space projection for ViT:
 
 **Key Feature**: Uses ASTRA results to determine which layers to edit!
 
-Exports: `logs/edit_log.csv`, `checkpoints/vit_pathmnist_edited.pt`
+#### Head Editing (`--edit-method head`)
+
+A simpler, faster alternative that modifies only the classification head:
+
+1. **Freeze Backbone**: Keep all transformer layers fixed
+2. **Compute Fisher Information**: For EWC regularization
+3. **Optimize Classifier**: Gradient descent on `model.classifier` only
+4. **EWC Regularization**: Prevents catastrophic forgetting
+
+**Key Features**:
+- Only 6,912 parameters modified (768×9 + 9) vs millions in AlphaEdit
+- Processes all samples in one batch (faster)
+- Optional closed-form solution with `--closed-form`
+
+Exports: `logs/edit_log.csv` or `logs/head_edit_log.csv`, `checkpoints/vit_pathmnist_*.pt`
 
 ### Stage 5: Evaluation (`--stage eval`)
 
@@ -187,10 +207,19 @@ Exports: `logs/edit_log.csv`, `checkpoints/vit_pathmnist_edited.pt`
 ### Editing Options
 | Argument | Default | Description |
 |----------|---------|-------------|
+| `--edit-method` | `alphaedit` | Editing method: `alphaedit` (MLP layers) or `head` (classifier only) |
 | `--edit-layers` | None | Manually specify layers to edit (e.g., `9 10 11`) |
 | `--num-edit-layers` | 3 | Number of top ASTRA layers to edit |
 | `--no-astra-layers` | False | Disable ASTRA layer selection, use default [9,10,11] |
 | `--max-edits` | 30 | Maximum samples to edit |
+
+### Head Editing Options
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--head-lr` | 0.01 | Learning rate for head editing |
+| `--head-steps` | 50 | Number of optimization steps |
+| `--ewc-lambda` | 1000.0 | EWC regularization strength |
+| `--closed-form` | False | Use closed-form solution (faster, less precise) |
 
 ### Output Options
 | Argument | Default | Description |
@@ -214,20 +243,30 @@ The pipeline determines which layers to edit using this priority:
 ### Examples
 
 ```bash
-# Use ASTRA results, edit top 3 layers (default)
+# AlphaEdit with ASTRA results, edit top 3 layers (default)
 uv run python src/main.py --stage full
 
-# Use ASTRA results, edit top 5 layers
+# AlphaEdit with ASTRA results, edit top 5 layers
 uv run python src/main.py --stage full --num-edit-layers 5
 
-# Disable ASTRA, use default layers [9,10,11]
-uv run python src/main.py --stage full --no-astra-layers
-
-# Manually specify layers (overrides ASTRA)
+# AlphaEdit with manually specified layers
 uv run python src/main.py --stage full --edit-layers 4 5 6
 
+# Head Editing (simpler, faster)
+uv run python src/main.py --stage full --edit-method head
+
+# Head Editing with custom parameters
+uv run python src/main.py --stage full --edit-method head --head-lr 0.005 --head-steps 100
+
+# Head Editing with closed-form solution (fastest)
+uv run python src/main.py --stage full --edit-method head --closed-form
+
+# Compare both methods
+uv run python src/main.py --stage full --edit-method alphaedit --run-name compare_alpha
+uv run python src/main.py --stage full --edit-method head --run-name compare_head
+
 # With timestamp for preserving results
-uv run python src/main.py --stage full --timestamp --num-edit-layers 4
+uv run python src/main.py --stage full --timestamp --edit-method head
 ```
 
 ## Technical Details
@@ -276,10 +315,17 @@ PathMNIST Dataset (89,996 images)
          │
          ▼
 ┌─────────────────────────────────────────────┐
-│  Stage 4: AlphaEdit Weight Editing          │
-│  Use ASTRA layers (or user-specified)       │
-│  Apply null-space projection edits          │
-│  Correct misclassified samples              │
+│  Stage 4: Weight Editing                    │
+│                                             │
+│  if --edit-method alphaedit:                │
+│    → Use ASTRA layers (or user-specified)   │
+│    → Null-space projection on MLP layers    │
+│    → Per-sample editing                     │
+│                                             │
+│  if --edit-method head:                     │
+│    → Modify classifier head only            │
+│    → EWC regularization                     │
+│    → Batch editing (faster)                 │
 └─────────────────────────────────────────────┘
          │
          ▼
@@ -290,6 +336,19 @@ PathMNIST Dataset (89,996 images)
 │  Generate confusion matrix & reports        │
 └─────────────────────────────────────────────┘
 ```
+
+### AlphaEdit vs Head Editing Comparison
+
+| Aspect | AlphaEdit | Head Editing |
+|--------|-----------|--------------|
+| **Target** | MLP output layers | Classifier head only |
+| **Parameters** | ~2.36M per layer | 6,912 (768×9 + 9) |
+| **Precomputation** | Null-space projection | Fisher information |
+| **Regularization** | Null-space constraint | EWC |
+| **Processing** | Per-sample | Batch (all samples) |
+| **Speed** | Slower | Faster |
+| **ASTRA Required** | Yes (for layer selection) | No |
+| **Use Case** | Deep representation changes | Direct classification fixes |
 
 ### AlphaEdit Formula
 
@@ -303,6 +362,14 @@ Where:
 The null-space projection P ensures edits don't affect predictions for correctly classified samples.
 
 ## Changelog
+
+### v1.3.0 (2026-01-14)
+- **Head Editing**: New alternative editing method that modifies only the classifier head
+  - Faster than AlphaEdit (batch processing, fewer parameters)
+  - EWC regularization to prevent catastrophic forgetting
+  - Optional closed-form solution with `--closed-form`
+- **New arguments**: `--edit-method`, `--head-lr`, `--head-steps`, `--ewc-lambda`, `--closed-form`
+- **HeadEditor class**: New class in editor.py with gradient-based and closed-form methods
 
 ### v1.2.0 (2026-01-14)
 - **ASTRA-guided layer selection**: Edit stage now uses causal tracing results

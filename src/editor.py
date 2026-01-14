@@ -120,6 +120,32 @@ class AlphaEditHyperParams:
         self.fact_token = fact_token
 
 
+class HeadEditHyperParams:
+    """Hyperparameters for Head Editing (classifier-only modification)."""
+
+    def __init__(
+        self,
+        # Optimization
+        num_steps: int = 50,
+        lr: float = 0.01,
+        weight_decay: float = 1e-4,
+        # EWC Regularization
+        ewc_lambda: float = 1000.0,
+        fisher_samples: int = 500,
+        # Method
+        closed_form: bool = False,
+        # Regularization strength for closed-form
+        reg_lambda: float = 1.0,
+    ):
+        self.num_steps = num_steps
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.ewc_lambda = ewc_lambda
+        self.fisher_samples = fisher_samples
+        self.closed_form = closed_form
+        self.reg_lambda = reg_lambda
+
+
 class KCollector:
     """
     Collects K vectors (inputs to target module) for AlphaEdit.
@@ -710,6 +736,394 @@ class Editor:
         for part in name.split('.'):
             model = getattr(model, part)
         return model
+
+
+class HeadEditor:
+    """
+    Head Editing: Modifies only the classification head to correct misclassifications.
+
+    A simpler and faster alternative to AlphaEdit that:
+    - Only modifies model.classifier (768 -> 9 linear layer)
+    - Uses EWC regularization to prevent catastrophic forgetting
+    - Supports gradient-based optimization or closed-form solution
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        device: torch.device = None,
+        hparams: HeadEditHyperParams = None,
+        log_dir: str = "logs"
+    ):
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.device = device
+        self.model = model.to(device)
+        self.hparams = hparams if hparams else HeadEditHyperParams()
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Fisher information for EWC
+        self.fisher_weight = None
+        self.fisher_bias = None
+        self.original_weight = None
+        self.original_bias = None
+
+        # Edit history
+        self.edit_history = []
+
+    def compute_fisher_information(
+        self,
+        dataloader: torch.utils.data.DataLoader,
+        num_samples: int = None
+    ):
+        """
+        Compute diagonal Fisher information matrix for classifier weights.
+        Used for EWC regularization to preserve knowledge.
+        """
+        if num_samples is None:
+            num_samples = self.hparams.fisher_samples
+
+        print(f"\nComputing Fisher information from {num_samples} samples...")
+        self.model.eval()
+
+        # Store original weights
+        self.original_weight = self.model.classifier.weight.data.clone()
+        self.original_bias = self.model.classifier.bias.data.clone()
+
+        # Initialize Fisher accumulators
+        self.fisher_weight = torch.zeros_like(self.model.classifier.weight)
+        self.fisher_bias = torch.zeros_like(self.model.classifier.bias)
+
+        count = 0
+        for images, labels in tqdm(dataloader, desc="Computing Fisher"):
+            if count >= num_samples:
+                break
+
+            images = images.to(self.device)
+            labels = labels.to(self.device)
+
+            self.model.zero_grad()
+            outputs = self.model(images)
+
+            # Use log-likelihood
+            log_probs = torch.log_softmax(outputs.logits, dim=1)
+            loss = nn.functional.nll_loss(log_probs, labels)
+            loss.backward()
+
+            # Accumulate squared gradients
+            if self.model.classifier.weight.grad is not None:
+                self.fisher_weight += self.model.classifier.weight.grad.data ** 2
+            if self.model.classifier.bias.grad is not None:
+                self.fisher_bias += self.model.classifier.bias.grad.data ** 2
+
+            count += images.shape[0]
+
+        # Normalize
+        self.fisher_weight /= count
+        self.fisher_bias /= count
+
+        print(f"Fisher information computed (weight norm: {self.fisher_weight.norm():.4f})")
+
+    def _compute_ewc_loss(self) -> torch.Tensor:
+        """Compute EWC regularization loss."""
+        if self.fisher_weight is None or self.original_weight is None:
+            return torch.tensor(0.0, device=self.device)
+
+        weight_diff = self.model.classifier.weight - self.original_weight
+        bias_diff = self.model.classifier.bias - self.original_bias
+
+        ewc_loss = (
+            (self.fisher_weight * weight_diff ** 2).sum() +
+            (self.fisher_bias * bias_diff ** 2).sum()
+        )
+
+        return ewc_loss
+
+    def apply_edit(
+        self,
+        images: torch.Tensor,
+        true_labels: torch.Tensor,
+        sample_indices: List[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Apply gradient-based head editing with EWC regularization.
+
+        Args:
+            images: Misclassified images (B, C, H, W)
+            true_labels: Correct labels (B,)
+            sample_indices: Optional indices for logging
+
+        Returns:
+            Dictionary with edit information
+        """
+        if self.hparams.closed_form:
+            return self.apply_closed_form_edit(images, true_labels, sample_indices)
+
+        images = images.to(self.device)
+        true_labels = true_labels.to(self.device)
+
+        if sample_indices is None:
+            sample_indices = list(range(len(images)))
+
+        # Store pre-edit state
+        pre_weight = self.model.classifier.weight.data.clone()
+        pre_bias = self.model.classifier.bias.data.clone()
+
+        # Freeze all parameters except classifier
+        for name, param in self.model.named_parameters():
+            param.requires_grad = 'classifier' in name
+
+        # Get CLS token representations (frozen backbone)
+        self.model.eval()
+        with torch.no_grad():
+            # Access ViT backbone
+            vit_outputs = self.model.vit(images)
+            cls_representations = vit_outputs.last_hidden_state[:, 0, :]  # (B, 768)
+
+        # Pre-edit predictions
+        with torch.no_grad():
+            pre_logits = self.model.classifier(cls_representations)
+            pre_preds = pre_logits.argmax(dim=1)
+
+        # Optimizer for classifier only
+        optimizer = torch.optim.Adam(
+            self.model.classifier.parameters(),
+            lr=self.hparams.lr,
+            weight_decay=self.hparams.weight_decay
+        )
+
+        # Optimization loop
+        losses = []
+        for step in range(self.hparams.num_steps):
+            optimizer.zero_grad()
+
+            # Forward through classifier
+            logits = self.model.classifier(cls_representations)
+
+            # Classification loss
+            ce_loss = nn.CrossEntropyLoss()(logits, true_labels)
+
+            # EWC regularization
+            ewc_loss = self._compute_ewc_loss()
+
+            # Total loss
+            loss = ce_loss + self.hparams.ewc_lambda * ewc_loss
+
+            loss.backward()
+            optimizer.step()
+
+            losses.append(loss.item())
+
+        # Restore all parameters to trainable
+        for param in self.model.parameters():
+            param.requires_grad = True
+
+        # Post-edit predictions
+        with torch.no_grad():
+            post_logits = self.model.classifier(cls_representations)
+            post_preds = post_logits.argmax(dim=1)
+
+        # Compute update statistics
+        weight_change = (self.model.classifier.weight.data - pre_weight).norm().item()
+        bias_change = (self.model.classifier.bias.data - pre_bias).norm().item()
+
+        # Check success
+        corrected = (post_preds == true_labels).sum().item()
+        total = len(true_labels)
+
+        edit_info = {
+            'sample_indices': sample_indices,
+            'num_samples': total,
+            'corrected': corrected,
+            'success_rate': corrected / total,
+            'weight_change_norm': weight_change,
+            'bias_change_norm': bias_change,
+            'final_loss': losses[-1] if losses else 0,
+            'pre_predictions': pre_preds.cpu().tolist(),
+            'post_predictions': post_preds.cpu().tolist(),
+            'true_labels': true_labels.cpu().tolist(),
+            'method': 'gradient'
+        }
+
+        self.edit_history.append(edit_info)
+
+        print(f"  Corrected: {corrected}/{total} ({100*corrected/total:.1f}%)")
+        print(f"  Weight change: {weight_change:.6f}, Bias change: {bias_change:.6f}")
+
+        return edit_info
+
+    def apply_closed_form_edit(
+        self,
+        images: torch.Tensor,
+        true_labels: torch.Tensor,
+        sample_indices: List[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Apply closed-form least-squares head editing.
+
+        Solves: W_new = argmin ||W @ X - Y||^2 + lambda * ||W - W_old||^2
+        """
+        images = images.to(self.device)
+        true_labels = true_labels.to(self.device)
+
+        if sample_indices is None:
+            sample_indices = list(range(len(images)))
+
+        # Store pre-edit state
+        pre_weight = self.model.classifier.weight.data.clone()
+        pre_bias = self.model.classifier.bias.data.clone()
+
+        # Get CLS token representations
+        self.model.eval()
+        with torch.no_grad():
+            vit_outputs = self.model.vit(images)
+            cls_representations = vit_outputs.last_hidden_state[:, 0, :]  # (B, 768)
+
+            # Pre-edit predictions
+            pre_logits = self.model.classifier(cls_representations)
+            pre_preds = pre_logits.argmax(dim=1)
+
+        # Prepare matrices
+        X = cls_representations.T  # (768, B)
+        num_classes = self.model.classifier.weight.shape[0]
+        Y = nn.functional.one_hot(true_labels, num_classes=num_classes).float().T  # (9, B)
+
+        W_old = self.model.classifier.weight.data  # (9, 768)
+
+        # Regularized least squares solution
+        # W_new = (Y @ X.T + lambda * W_old) @ (X @ X.T + lambda * I)^{-1}
+        lambda_reg = self.hparams.reg_lambda
+
+        XXT = X @ X.T  # (768, 768)
+        YXT = Y @ X.T  # (9, 768)
+
+        A = XXT + lambda_reg * torch.eye(X.shape[0], device=self.device, dtype=X.dtype)
+        B = YXT + lambda_reg * W_old
+
+        try:
+            W_new = torch.linalg.solve(A.T, B.T).T
+        except Exception as e:
+            print(f"Warning: Closed-form solve failed, using pseudoinverse: {e}")
+            A_inv = torch.linalg.pinv(A)
+            W_new = B @ A_inv
+
+        # Apply update
+        with torch.no_grad():
+            self.model.classifier.weight.data = W_new
+
+        # Post-edit predictions
+        with torch.no_grad():
+            post_logits = self.model.classifier(cls_representations)
+            post_preds = post_logits.argmax(dim=1)
+
+        # Compute statistics
+        weight_change = (self.model.classifier.weight.data - pre_weight).norm().item()
+
+        corrected = (post_preds == true_labels).sum().item()
+        total = len(true_labels)
+
+        edit_info = {
+            'sample_indices': sample_indices,
+            'num_samples': total,
+            'corrected': corrected,
+            'success_rate': corrected / total,
+            'weight_change_norm': weight_change,
+            'bias_change_norm': 0.0,  # Bias not modified in closed-form
+            'final_loss': 0,
+            'pre_predictions': pre_preds.cpu().tolist(),
+            'post_predictions': post_preds.cpu().tolist(),
+            'true_labels': true_labels.cpu().tolist(),
+            'method': 'closed_form'
+        }
+
+        self.edit_history.append(edit_info)
+
+        print(f"  Corrected: {corrected}/{total} ({100*corrected/total:.1f}%)")
+        print(f"  Weight change: {weight_change:.6f}")
+
+        return edit_info
+
+    def apply_batch_edit(
+        self,
+        dataloader: torch.utils.data.DataLoader,
+        misclassified_info: Dict[str, Any],
+        max_edits: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply edits to multiple misclassified samples.
+        """
+        indices = misclassified_info['indices'][:max_edits]
+        dataset = dataloader.dataset
+
+        # Collect all samples
+        images_list = []
+        labels_list = []
+
+        for idx in indices:
+            image, label = dataset[idx]
+            images_list.append(image)
+            labels_list.append(label)
+
+        images = torch.stack(images_list)
+        labels = torch.tensor(labels_list)
+
+        # Apply edit to all samples at once
+        result = self.apply_edit(
+            images=images,
+            true_labels=labels,
+            sample_indices=indices
+        )
+
+        return [result]
+
+    def export_edit_log(self, filename: str = "head_edit_log.csv") -> str:
+        """Export edit history to CSV."""
+        if not self.edit_history:
+            print("No edit history to export.")
+            return None
+
+        rows = []
+        for edit in self.edit_history:
+            rows.append({
+                'sample_indices': str(edit['sample_indices']),
+                'num_samples': edit['num_samples'],
+                'corrected': edit['corrected'],
+                'success_rate': edit['success_rate'],
+                'weight_change_norm': edit['weight_change_norm'],
+                'bias_change_norm': edit['bias_change_norm'],
+                'method': edit['method']
+            })
+
+        df = pd.DataFrame(rows)
+        csv_path = self.log_dir / filename
+        df.to_csv(csv_path, index=False)
+
+        print(f"Head edit log exported to: {csv_path}")
+        return str(csv_path)
+
+    def save_edited_model(self, filepath: str = None) -> str:
+        """Save the edited model."""
+        if filepath is None:
+            filepath = Path("checkpoints") / "vit_pathmnist_head_edited.pt"
+        else:
+            filepath = Path(filepath)
+
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'edit_history': self.edit_history,
+            'hparams': vars(self.hparams),
+            'fisher_weight': self.fisher_weight,
+            'fisher_bias': self.fisher_bias,
+            'original_weight': self.original_weight,
+            'original_bias': self.original_bias
+        }, filepath)
+
+        print(f"Head-edited model saved to: {filepath}")
+        return str(filepath)
 
 
 def main():
