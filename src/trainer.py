@@ -1,10 +1,12 @@
 """
 Trainer Module for ViT Model Editing Pipeline
 ==============================================
-Fine-tunes ViT-B/16 on PathMNIST training set with:
+Fine-tunes ViT-B/16 on MedMNIST datasets with:
 - Automatic GPU/CPU device selection
 - Checkpoint saving and loading
 - Training metrics logging
+- Multi-dataset support (PathMNIST, DermaMNIST, OrganAMNIST, etc.)
+- Grayscale to RGB conversion for ViT compatibility
 """
 
 import os
@@ -22,62 +24,73 @@ from tqdm import tqdm
 from transformers import ViTForImageClassification, ViTImageProcessor
 from torchvision import transforms
 
-from data_handler import DataHandler, PathMNISTDataset
+from data_handler import DataHandler, MedMNISTDataset
 
 
 class Trainer:
     """
-    Fine-tunes ViT model on PathMNIST dataset.
+    Fine-tunes ViT model on MedMNIST datasets.
     Handles device selection, checkpointing, and logging automatically.
+    Supports multiple datasets with different number of classes.
     """
-    
+
     def __init__(
         self,
         model_name: str = "google/vit-base-patch16-224",
         num_classes: int = 9,
+        dataset_name: str = "pathmnist",
         checkpoint_dir: str = "checkpoints",
         log_dir: str = "logs",
-        device: str = None
+        device: str = None,
+        n_channels: int = 3
     ):
         """
         Args:
             model_name: HuggingFace model identifier
-            num_classes: Number of output classes (9 for PathMNIST)
+            num_classes: Number of output classes (varies by dataset)
+            dataset_name: Name of the dataset (for checkpoint naming)
             checkpoint_dir: Directory to save model checkpoints
             log_dir: Directory to save training logs
             device: Device to use ('cuda', 'cpu', or None for auto-detection)
+            n_channels: Number of input channels (1 for grayscale, 3 for RGB)
         """
         self.model_name = model_name
         self.num_classes = num_classes
+        self.dataset_name = dataset_name
         self.checkpoint_dir = Path(checkpoint_dir)
         self.log_dir = Path(log_dir)
-        
+        self.n_channels = n_channels
+
         # Create directories
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Auto-detect device
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
-        
+
         print(f"Using device: {self.device}")
         if self.device.type == "cuda":
             print(f"  GPU: {torch.cuda.get_device_name(0)}")
             print(f"  Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-        
+
         # Model components (initialized later)
         self.model = None
         self.processor = None
         self.optimizer = None
         self.scheduler = None
         self.criterion = None
-        
+
         # Training state
         self.current_epoch = 0
         self.best_acc = 0.0
         self.training_history = []
+
+        # Checkpoint naming (includes dataset name)
+        self.checkpoint_name = f"vit_{self.dataset_name}_finetuned.pt"
+        self.best_checkpoint_name = f"vit_{self.dataset_name}_best.pt"
         
     def setup_model(self) -> nn.Module:
         """Initialize ViT model for image classification."""
@@ -105,16 +118,29 @@ class Trainer:
         return self.model
     
     def get_transforms(self) -> transforms.Compose:
-        """Get image transforms for ViT input."""
-        # ViT-B/16 expects 224x224 images, normalized with ImageNet stats
-        return transforms.Compose([
+        """
+        Get image transforms for ViT input.
+
+        CRITICAL: For grayscale images (n_channels=1), we add Grayscale(3)
+        BEFORE ToTensor to convert to 3-channel RGB for ViT compatibility.
+        """
+        transform_list = [
             transforms.Resize((224, 224)),
+        ]
+
+        # Handle grayscale images: convert to 3-channel RGB
+        if self.n_channels == 1:
+            transform_list.append(transforms.Grayscale(num_output_channels=3))
+
+        transform_list.extend([
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225]
             )
         ])
+
+        return transforms.Compose(transform_list)
     
     def setup_training(
         self,
@@ -298,7 +324,7 @@ class Trainer:
             if save_best and val_metrics['val_acc'] > self.best_acc:
                 self.best_acc = val_metrics['val_acc']
                 self.save_checkpoint(
-                    filepath=self.checkpoint_dir / "vit_pathmnist_finetuned.pt",
+                    filepath=self.checkpoint_dir / self.checkpoint_name,
                     is_best=True
                 )
                 print(f"  ✓ New best model saved! (Acc: {self.best_acc:.2f}%)")
@@ -326,7 +352,7 @@ class Trainer:
     ):
         """
         Save model checkpoint.
-        
+
         Checkpoint contains:
         - model_state_dict: Model weights
         - optimizer_state_dict: Optimizer state
@@ -337,8 +363,8 @@ class Trainer:
         - config: Model and training configuration
         """
         if filepath is None:
-            filepath = self.checkpoint_dir / "vit_pathmnist_finetuned.pt"
-        
+            filepath = self.checkpoint_dir / self.checkpoint_name
+
         checkpoint = {
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer else None,
@@ -349,16 +375,18 @@ class Trainer:
             'config': {
                 'model_name': self.model_name,
                 'num_classes': self.num_classes,
+                'dataset_name': self.dataset_name,
+                'n_channels': self.n_channels,
                 'device': str(self.device)
             }
         }
-        
+
         torch.save(checkpoint, filepath)
-        
-        # Also save a "latest" checkpoint
+
+        # Also save a "best" checkpoint
         if is_best:
-            latest_path = self.checkpoint_dir / "vit_pathmnist_best.pt"
-            torch.save(checkpoint, latest_path)
+            best_path = self.checkpoint_dir / self.best_checkpoint_name
+            torch.save(checkpoint, best_path)
     
     def load_checkpoint(
         self,
@@ -367,17 +395,17 @@ class Trainer:
     ) -> Dict[str, Any]:
         """
         Load model checkpoint.
-        
+
         Args:
             filepath: Path to checkpoint file
             load_optimizer: Whether to restore optimizer state
-            
+
         Returns:
             Checkpoint dictionary
         """
         if filepath is None:
-            filepath = self.checkpoint_dir / "vit_pathmnist_finetuned.pt"
-        
+            filepath = self.checkpoint_dir / self.checkpoint_name
+
         if not filepath.exists():
             raise FileNotFoundError(f"Checkpoint not found: {filepath}")
         
@@ -415,11 +443,11 @@ class Trainer:
         if not self.training_history:
             print("No training history to export.")
             return None
-        
+
         df = pd.DataFrame(self.training_history)
-        csv_path = self.log_dir / "training_metrics.csv"
+        csv_path = self.log_dir / f"{self.dataset_name}_training_metrics.csv"
         df.to_csv(csv_path, index=False)
-        
+
         print(f"Training log exported to: {csv_path}")
         return str(csv_path)
     
@@ -519,45 +547,51 @@ class Trainer:
 def main():
     """Test trainer functionality."""
     print("=" * 70)
-    print("ViT Model Editing Pipeline - Trainer")
+    print("ViT Model Editing Pipeline - Trainer (Multi-Dataset Support)")
     print("=" * 70)
-    
-    # Initialize data handler
+
+    # Initialize data handler with default dataset
+    dataset_name = "pathmnist"
     data_handler = DataHandler(
-        held_out_ratio=0.2,
+        dataset_name=dataset_name,
+        ft_train_ratio=0.9,
         random_seed=42
     )
     data_handler.load_data()
-    data_handler.create_held_out_split()
-    
-    # Initialize trainer
+    data_handler.create_resplit()
+
+    # Initialize trainer with dynamic num_classes
     trainer = Trainer(
         model_name="google/vit-base-patch16-224",
-        num_classes=9
+        num_classes=data_handler.n_classes,
+        dataset_name=dataset_name,
+        n_channels=data_handler.n_channels
     )
-    
+
     # Setup model
     trainer.setup_model()
-    
+
     # Get transforms and dataloaders
     transform = trainer.get_transforms()
     dataloaders = data_handler.get_dataloaders(
         batch_size=32,
         transform=transform
     )
-    
+
     # Train (short run for testing)
     print("\nStarting training (test run with 2 epochs)...")
     results = trainer.train(
-        train_loader=dataloaders['train'],
+        train_loader=dataloaders['ft_train'],
         val_loader=dataloaders['val'],
         epochs=2,
         learning_rate=1e-4
     )
-    
+
     print("\n✓ Trainer test complete!")
+    print(f"  Dataset: {dataset_name}")
+    print(f"  Classes: {data_handler.n_classes}")
     print(f"  Best accuracy: {results['best_acc']:.2f}%")
-    print(f"  Checkpoint saved to: checkpoints/vit_pathmnist_finetuned.pt")
+    print(f"  Checkpoint: {trainer.checkpoint_dir}/{trainer.checkpoint_name}")
 
 
 if __name__ == "__main__":

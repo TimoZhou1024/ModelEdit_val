@@ -446,33 +446,36 @@ class NullSpaceProjector:
 class Editor:
     """
     Main class for AlphaEdit weight editing in ViT models.
+    Supports multiple MedMNIST datasets with dataset-specific checkpoint naming.
     """
-    
+
     def __init__(
         self,
         model: nn.Module,
         device: torch.device = None,
         hparams: AlphaEditHyperParams = None,
-        log_dir: str = "logs"
+        log_dir: str = "logs",
+        dataset_name: str = "pathmnist"
     ):
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+
         self.device = device
         self.model = model.to(device)
         self.hparams = hparams if hparams else AlphaEditHyperParams()
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        
+        self.dataset_name = dataset_name
+
         # Components
         self.k_collector = KCollector(model, device, self.hparams)
         self.z_computer = ZComputer(model, device, self.hparams)
         self.projector = NullSpaceProjector(self.hparams.nullspace_threshold)
-        
+
         # Cache for sequential edits
         self.cache_KKT = {}  # layer -> K_prev @ K_prev^T
         self.P = {}  # layer -> projection matrix
-        
+
         # Edit history
         self.edit_history = []
     
@@ -725,18 +728,19 @@ class Editor:
     def save_edited_model(self, filepath: str = None) -> str:
         """Save the edited model."""
         if filepath is None:
-            filepath = Path("checkpoints") / "vit_pathmnist_edited.pt"
+            filepath = Path("checkpoints") / f"vit_{self.dataset_name}_edited.pt"
         else:
             filepath = Path(filepath)
-        
+
         filepath.parent.mkdir(parents=True, exist_ok=True)
-        
+
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'edit_history': self.edit_history,
-            'hparams': vars(self.hparams)
+            'hparams': vars(self.hparams),
+            'dataset_name': self.dataset_name
         }, filepath)
-        
+
         print(f"Edited model saved to: {filepath}")
         return str(filepath)
     
@@ -752,9 +756,10 @@ class HeadEditor:
     Head Editing: Modifies only the classification head to correct misclassifications.
 
     A simpler and faster alternative to AlphaEdit that:
-    - Only modifies model.classifier (768 -> 9 linear layer)
+    - Only modifies model.classifier (768 -> num_classes linear layer)
     - Uses EWC regularization to prevent catastrophic forgetting
     - Supports gradient-based optimization or closed-form solution
+    - Supports multiple MedMNIST datasets with dataset-specific checkpoint naming
     """
 
     def __init__(
@@ -762,7 +767,8 @@ class HeadEditor:
         model: nn.Module,
         device: torch.device = None,
         hparams: HeadEditHyperParams = None,
-        log_dir: str = "logs"
+        log_dir: str = "logs",
+        dataset_name: str = "pathmnist"
     ):
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -772,6 +778,7 @@ class HeadEditor:
         self.hparams = hparams if hparams else HeadEditHyperParams()
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.dataset_name = dataset_name
 
         # Fisher information for EWC
         self.fisher_weight = None
@@ -1124,7 +1131,7 @@ class HeadEditor:
     def save_edited_model(self, filepath: str = None) -> str:
         """Save the edited model."""
         if filepath is None:
-            filepath = Path("checkpoints") / "vit_pathmnist_head_edited.pt"
+            filepath = Path("checkpoints") / f"vit_{self.dataset_name}_head_edited.pt"
         else:
             filepath = Path(filepath)
 
@@ -1134,6 +1141,7 @@ class HeadEditor:
             'model_state_dict': self.model.state_dict(),
             'edit_history': self.edit_history,
             'hparams': vars(self.hparams),
+            'dataset_name': self.dataset_name,
             'fisher_weight': self.fisher_weight,
             'fisher_bias': self.fisher_bias,
             'original_weight': self.original_weight,

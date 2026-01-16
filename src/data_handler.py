@@ -12,6 +12,14 @@ Implements the STRICT 4-Set Data Protocol (Re-split Strategy):
 
 CRITICAL: Edit-Discovery samples are NEVER seen during fine-tuning,
 simulating realistic generalization errors for model editing experiments.
+
+Supported Datasets:
+- pathmnist: Colon Pathology (9 classes, RGB)
+- dermamnist: Dermatoscopy (7 classes, RGB) - Imbalanced
+- retinamnist: Retinal OCT (5 classes, RGB) - Fine-grained
+- organamnist: Abdominal CT (11 classes, Grayscale) - Shape-based
+- bloodmnist: Blood Cell Microscopy (8 classes, RGB)
+- tissuemnist: Kidney Cortex Microscopy (8 classes, Grayscale)
 """
 
 import os
@@ -24,43 +32,118 @@ import torch
 from PIL import Image
 
 
-class PathMNISTDataset(Dataset):
-    """
-    Custom Dataset for PathMNIST loaded from .npz file.
-    Images are 224x224x3, labels are integers 0-8 (9 classes).
-    """
+# ============================================================================
+# Dataset Registry: Metadata for supported MedMNIST datasets
+# ============================================================================
+MEDMNIST_INFO = {
+    "pathmnist": {
+        "n_channels": 3,
+        "n_classes": 9,
+        "data_file": "pathmnist_224.npz",
+        "task": "multi-class",
+        "description": "Colon Pathology - 9 tissue types",
+        "class_names": [
+            "Adipose", "Background", "Debris", "Lymphocytes", "Mucus",
+            "Smooth Muscle", "Normal Colon Mucosa", "Cancer-associated Stroma",
+            "Colorectal Adenocarcinoma Epithelium"
+        ]
+    },
+    "dermamnist": {
+        "n_channels": 3,
+        "n_classes": 7,
+        "data_file": "dermamnist_224.npz",
+        "task": "multi-class",
+        "description": "Dermatoscopy - 7 skin lesion types (Imbalanced)",
+        "class_names": [
+            "Actinic Keratoses", "Basal Cell Carcinoma", "Benign Keratosis",
+            "Dermatofibroma", "Melanoma", "Melanocytic Nevi", "Vascular Lesions"
+        ]
+    },
+    "retinamnist": {
+        "n_channels": 3,
+        "n_classes": 5,
+        "data_file": "retinamnist_224.npz",
+        "task": "ordinal-regression",
+        "description": "Retinal Fundus - 5 diabetic retinopathy grades (Fine-grained)",
+        "class_names": [
+            "No DR", "Mild", "Moderate", "Severe", "Proliferative DR"
+        ]
+    },
+    "organamnist": {
+        "n_channels": 1,  # Grayscale!
+        "n_classes": 11,
+        "data_file": "organamnist_224.npz",
+        "task": "multi-class",
+        "description": "Abdominal CT - 11 organ types (Grayscale/Shape)",
+        "class_names": [
+            "Bladder", "Femur-Left", "Femur-Right", "Heart", "Kidney-Left",
+            "Kidney-Right", "Liver", "Lung-Left", "Lung-Right", "Spleen", "Pancreas"
+        ]
+    },
+    "bloodmnist": {
+        "n_channels": 3,
+        "n_classes": 8,
+        "data_file": "bloodmnist_224.npz",
+        "task": "multi-class",
+        "description": "Blood Cell Microscopy - 8 cell types",
+        "class_names": [
+            "Basophil", "Eosinophil", "Erythroblast", "Immature Granulocytes",
+            "Lymphocyte", "Monocyte", "Neutrophil", "Platelet"
+        ]
+    },
+    "tissuemnist": {
+        "n_channels": 1,  # Grayscale!
+        "n_classes": 8,
+        "data_file": "tissuemnist_224.npz",
+        "task": "multi-class",
+        "description": "Kidney Cortex Microscopy - 8 tissue types (Grayscale)",
+        "class_names": [
+            "Collecting Duct", "Distal Convoluted Tubule", "Glomerular Endothelial",
+            "Interstitial", "Leukocytes", "Podocytes", "Proximal Tubule", "Thick Ascending Limb"
+        ]
+    }
+}
 
-    # Class names for PathMNIST (9 tissue types)
-    CLASS_NAMES = [
-        "Adipose",           # 0
-        "Background",        # 1
-        "Debris",            # 2
-        "Lymphocytes",       # 3
-        "Mucus",             # 4
-        "Smooth Muscle",     # 5
-        "Normal Colon Mucosa",  # 6
-        "Cancer-associated Stroma",  # 7
-        "Colorectal Adenocarcinoma Epithelium"  # 8
-    ]
+
+def get_dataset_info(dataset_name: str) -> Dict[str, Any]:
+    """Get metadata for a MedMNIST dataset."""
+    dataset_name = dataset_name.lower()
+    if dataset_name not in MEDMNIST_INFO:
+        available = ", ".join(MEDMNIST_INFO.keys())
+        raise ValueError(f"Unknown dataset: {dataset_name}. Available: {available}")
+    return MEDMNIST_INFO[dataset_name]
+
+
+class MedMNISTDataset(Dataset):
+    """
+    Generic Dataset for MedMNIST datasets loaded from .npz files.
+    Supports both RGB (3-channel) and Grayscale (1-channel) images.
+    """
 
     def __init__(
         self,
         images: np.ndarray,
         labels: np.ndarray,
         transform=None,
-        indices: np.ndarray = None
+        indices: np.ndarray = None,
+        n_channels: int = 3,
+        class_names: list = None
     ):
         """
         Args:
-            images: numpy array of shape (N, 224, 224, 3)
+            images: numpy array of shape (N, H, W, C) or (N, H, W) for grayscale
             labels: numpy array of shape (N,) or (N, 1)
             transform: optional transforms to apply
             indices: optional indices to subset the data
+            n_channels: number of channels in the original images (1 or 3)
+            class_names: list of class names for this dataset
         """
         self.images = images
         self.labels = labels.flatten()
         self.transform = transform
         self.indices = indices if indices is not None else np.arange(len(images))
+        self.n_channels = n_channels
+        self.class_names = class_names or []
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -70,21 +153,46 @@ class PathMNISTDataset(Dataset):
         image = self.images[real_idx]
         label = int(self.labels[real_idx])
 
+        # Handle grayscale images: ensure they have a channel dimension
+        if self.n_channels == 1 and image.ndim == 2:
+            # Add channel dimension: (H, W) -> (H, W, 1)
+            image = np.expand_dims(image, axis=-1)
+
         # Convert to PIL Image for transforms
-        image = Image.fromarray(image.astype(np.uint8))
+        if self.n_channels == 1:
+            # Grayscale: squeeze to 2D for PIL
+            image = Image.fromarray(image.squeeze().astype(np.uint8), mode='L')
+        else:
+            # RGB
+            image = Image.fromarray(image.astype(np.uint8), mode='RGB')
 
         if self.transform:
             image = self.transform(image)
         else:
             # Default: convert to tensor and normalize to [0, 1]
-            image = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
+            image = np.array(image)
+            if image.ndim == 2:
+                image = np.stack([image] * 3, axis=-1)  # Grayscale -> RGB
+            image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
 
         return image, label
+
+
+# Legacy alias for backward compatibility
+PathMNISTDataset = MedMNISTDataset
 
 
 class DataHandler:
     """
     Handles data loading and the STRICT 4-Set Data Protocol for ViT editing.
+
+    Supports multiple MedMNIST datasets:
+    - pathmnist: Colon Pathology (9 classes, RGB)
+    - dermamnist: Dermatoscopy (7 classes, RGB) - Imbalanced
+    - retinamnist: Retinal OCT (5 classes, RGB) - Fine-grained
+    - organamnist: Abdominal CT (11 classes, Grayscale)
+    - bloodmnist: Blood Cell Microscopy (8 classes, RGB)
+    - tissuemnist: Kidney Cortex Microscopy (8 classes, Grayscale)
 
     Re-split Strategy:
     ------------------
@@ -102,6 +210,7 @@ class DataHandler:
 
     def __init__(
         self,
+        dataset_name: str = "pathmnist",
         data_path: str = None,
         ft_train_ratio: float = 0.9,
         random_seed: int = 42,
@@ -109,14 +218,24 @@ class DataHandler:
     ):
         """
         Args:
-            data_path: Path to pathmnist_224.npz file
+            dataset_name: Name of MedMNIST dataset (pathmnist, dermamnist, etc.)
+            data_path: Path to .npz file (default: ~/.medmnist/{dataset}_224.npz)
             ft_train_ratio: Fraction of official train for FT-Train (default: 0.9)
                             Remaining (1 - ft_train_ratio) goes to Edit-Discovery
             random_seed: Random seed for reproducible splitting
             log_dir: Directory to save split information and indices
         """
+        # Get dataset metadata
+        self.dataset_name = dataset_name.lower()
+        self.dataset_info = get_dataset_info(self.dataset_name)
+        self.n_classes = self.dataset_info["n_classes"]
+        self.n_channels = self.dataset_info["n_channels"]
+        self.class_names = self.dataset_info["class_names"]
+
+        # Resolve data path
         if data_path is None:
-            data_path = os.path.expanduser("~/.medmnist/pathmnist_224.npz")
+            data_file = self.dataset_info["data_file"]
+            data_path = os.path.expanduser(f"~/.medmnist/{data_file}")
 
         self.data_path = Path(data_path)
         self.ft_train_ratio = ft_train_ratio
@@ -140,21 +259,27 @@ class DataHandler:
         self.train_indices = None         # Alias for ft_train_indices
         self.held_out_indices = None      # Alias for discovery_indices
 
-        # Split indices file path
-        self.split_indices_path = self.log_dir / "split_indices.pt"
+        # Split indices file path (includes dataset name for isolation)
+        self.split_indices_path = self.log_dir / f"{self.dataset_name}_split_indices.pt"
 
         # Statistics
         self.split_info = {}
+
+        print(f"DataHandler initialized for: {self.dataset_name}")
+        print(f"  Classes: {self.n_classes}")
+        print(f"  Channels: {self.n_channels} ({'Grayscale' if self.n_channels == 1 else 'RGB'})")
+        print(f"  Description: {self.dataset_info['description']}")
         
     def load_data(self) -> Dict[str, np.ndarray]:
-        """Load PathMNIST data from .npz file."""
+        """Load MedMNIST data from .npz file."""
         if not self.data_path.exists():
             raise FileNotFoundError(
-                f"PathMNIST data not found at {self.data_path}. "
-                "Please download it first."
+                f"{self.dataset_name} data not found at {self.data_path}. "
+                f"Please download it first: "
+                f"https://medmnist.com/"
             )
 
-        print(f"Loading PathMNIST from {self.data_path}...")
+        print(f"Loading {self.dataset_name} from {self.data_path}...")
         data = np.load(self.data_path)
 
         # Standard MedMNIST split keys
@@ -181,6 +306,7 @@ class DataHandler:
     def _save_split_indices(self) -> str:
         """Save split indices to file for reproducibility."""
         torch.save({
+            'dataset_name': self.dataset_name,
             'ft_train_indices': self.ft_train_indices,
             'discovery_indices': self.discovery_indices,
             'ft_train_ratio': self.ft_train_ratio,
@@ -202,11 +328,12 @@ class DataHandler:
         saved = torch.load(self.split_indices_path)
 
         # Verify config matches
-        if (saved.get('ft_train_ratio') != self.ft_train_ratio or
+        if (saved.get('dataset_name') != self.dataset_name or
+            saved.get('ft_train_ratio') != self.ft_train_ratio or
             saved.get('random_seed') != self.random_seed):
             print(f"  Warning: Saved split config differs from current config.")
-            print(f"    Saved: ratio={saved.get('ft_train_ratio')}, seed={saved.get('random_seed')}")
-            print(f"    Current: ratio={self.ft_train_ratio}, seed={self.random_seed}")
+            print(f"    Saved: dataset={saved.get('dataset_name')}, ratio={saved.get('ft_train_ratio')}, seed={saved.get('random_seed')}")
+            print(f"    Current: dataset={self.dataset_name}, ratio={self.ft_train_ratio}, seed={self.random_seed}")
             print(f"  Regenerating split...")
             return False
 
@@ -329,12 +456,12 @@ class DataHandler:
             'edit_discovery': len(self.discovery_indices),
             'ft_val': len(self.val_labels),
             'test_set': len(self.test_labels),
-            'notes': f'seed={self.random_seed}, ratio={self.ft_train_ratio}'
+            'notes': f'dataset={self.dataset_name}, seed={self.random_seed}, ratio={self.ft_train_ratio}'
         })
 
         # Per-class statistics
-        for class_id in range(9):
-            class_name = PathMNISTDataset.CLASS_NAMES[class_id]
+        for class_id in range(self.n_classes):
+            class_name = self.class_names[class_id] if class_id < len(self.class_names) else f"Class_{class_id}"
             rows.append({
                 'category': 'class_distribution',
                 'metric': f'class_{class_id}_{class_name}',
@@ -346,13 +473,13 @@ class DataHandler:
             })
 
         df = pd.DataFrame(rows)
-        csv_path = self.log_dir / 'data_split_info.csv'
+        csv_path = self.log_dir / f'{self.dataset_name}_data_split_info.csv'
         df.to_csv(csv_path, index=False)
 
         print(f"\nSplit info exported to: {csv_path}")
 
         # Print 4-Set Protocol summary
-        print("\n=== 4-Set Protocol Summary ===")
+        print(f"\n=== 4-Set Protocol Summary ({self.dataset_name}) ===")
         print(f"{'Set':<20} {'Samples':>10} {'Source':<25} {'Purpose':<35}")
         print("-" * 95)
         print(f"{'FT-Train':<20} {len(self.ft_train_indices):>10} {'Official Train (90%)':<25} {'Fine-tuning + AlphaEdit stats':<35}")
@@ -361,11 +488,11 @@ class DataHandler:
         print(f"{'Test Set':<20} {len(self.test_labels):>10} {'Official Test (100%)':<25} {'Final comparative evaluation':<35}")
 
         # Print class distribution
-        print("\n=== Class Distribution ===")
+        print(f"\n=== Class Distribution ({self.dataset_name}, {self.n_classes} classes) ===")
         print(f"{'Class':<35} {'FT-Train':>10} {'Discovery':>10} {'FT-Val':>10} {'Test':>10}")
         print("-" * 80)
-        for class_id in range(9):
-            class_name = PathMNISTDataset.CLASS_NAMES[class_id][:30]
+        for class_id in range(self.n_classes):
+            class_name = self.class_names[class_id][:30] if class_id < len(self.class_names) else f"Class_{class_id}"
             print(f"{class_id}: {class_name:<32} "
                   f"{ft_train_dist.get(class_id, 0):>10} "
                   f"{discovery_dist.get(class_id, 0):>10} "
@@ -374,7 +501,7 @@ class DataHandler:
 
         return str(csv_path)
     
-    def get_ft_train_dataset(self, transform=None) -> PathMNISTDataset:
+    def get_ft_train_dataset(self, transform=None) -> MedMNISTDataset:
         """
         Get FT-Train dataset (90% of official train).
 
@@ -385,14 +512,16 @@ class DataHandler:
         if self.ft_train_indices is None:
             self.create_resplit()
 
-        return PathMNISTDataset(
+        return MedMNISTDataset(
             images=self.train_images,
             labels=self.train_labels,
             transform=transform,
-            indices=self.ft_train_indices
+            indices=self.ft_train_indices,
+            n_channels=self.n_channels,
+            class_names=self.class_names
         )
 
-    def get_discovery_dataset(self, transform=None) -> PathMNISTDataset:
+    def get_discovery_dataset(self, transform=None) -> MedMNISTDataset:
         """
         Get Edit-Discovery dataset (10% of official train).
 
@@ -405,14 +534,16 @@ class DataHandler:
         if self.discovery_indices is None:
             self.create_resplit()
 
-        return PathMNISTDataset(
+        return MedMNISTDataset(
             images=self.train_images,
             labels=self.train_labels,
             transform=transform,
-            indices=self.discovery_indices
+            indices=self.discovery_indices,
+            n_channels=self.n_channels,
+            class_names=self.class_names
         )
 
-    def get_val_dataset(self, transform=None) -> PathMNISTDataset:
+    def get_val_dataset(self, transform=None) -> MedMNISTDataset:
         """
         Get FT-Val dataset (official validation set).
 
@@ -420,13 +551,15 @@ class DataHandler:
         - Early stopping during fine-tuning ONLY
         - Discarded after training phase
         """
-        return PathMNISTDataset(
+        return MedMNISTDataset(
             images=self.val_images,
             labels=self.val_labels,
-            transform=transform
+            transform=transform,
+            n_channels=self.n_channels,
+            class_names=self.class_names
         )
 
-    def get_test_dataset(self, transform=None) -> PathMNISTDataset:
+    def get_test_dataset(self, transform=None) -> MedMNISTDataset:
         """
         Get Test Set (official test set).
 
@@ -434,26 +567,28 @@ class DataHandler:
         - Final Comparative Evaluation (Pre-Edit vs Post-Edit)
         - NEVER used for training, validation, or editing decisions
         """
-        return PathMNISTDataset(
+        return MedMNISTDataset(
             images=self.test_images,
             labels=self.test_labels,
-            transform=transform
+            transform=transform,
+            n_channels=self.n_channels,
+            class_names=self.class_names
         )
 
     # Legacy aliases for backward compatibility
-    def get_train_dataset(self, transform=None) -> PathMNISTDataset:
+    def get_train_dataset(self, transform=None) -> MedMNISTDataset:
         """Legacy alias for get_ft_train_dataset()."""
         return self.get_ft_train_dataset(transform)
 
-    def get_held_out_dataset(self, transform=None) -> PathMNISTDataset:
+    def get_held_out_dataset(self, transform=None) -> MedMNISTDataset:
         """Legacy alias for get_discovery_dataset()."""
         return self.get_discovery_dataset(transform)
 
-    def get_original_val_dataset(self, transform=None) -> PathMNISTDataset:
+    def get_original_val_dataset(self, transform=None) -> MedMNISTDataset:
         """Legacy alias for get_val_dataset()."""
         return self.get_val_dataset(transform)
 
-    def get_original_test_dataset(self, transform=None) -> PathMNISTDataset:
+    def get_original_test_dataset(self, transform=None) -> MedMNISTDataset:
         """Legacy alias for get_test_dataset()."""
         return self.get_test_dataset(transform)
     
@@ -541,11 +676,15 @@ class DataHandler:
 def main():
     """Test data handler functionality with 4-Set Protocol."""
     print("=" * 70)
-    print("ViT Model Editing Pipeline - Data Handler (4-Set Protocol)")
+    print("ViT Model Editing Pipeline - Data Handler (Multi-Dataset Support)")
     print("=" * 70)
 
-    # Initialize handler with 90/10 split
+    # Test with default dataset (pathmnist)
+    dataset_name = "pathmnist"
+    print(f"\n>>> Testing with {dataset_name} <<<")
+
     handler = DataHandler(
+        dataset_name=dataset_name,
         ft_train_ratio=0.9,
         random_seed=42,
         log_dir="logs"
@@ -573,7 +712,8 @@ def main():
     # Test sample retrieval
     img, label = ft_train_ds[0]
     print(f"\nSample image shape: {img.shape}")
-    print(f"Sample label: {label} ({PathMNISTDataset.CLASS_NAMES[label]})")
+    class_name = handler.class_names[label] if label < len(handler.class_names) else f"Class_{label}"
+    print(f"Sample label: {label} ({class_name})")
 
     # Test dataloaders
     loaders = handler.get_dataloaders(batch_size=32)
@@ -581,7 +721,13 @@ def main():
     for key in loaders.keys():
         print(f"  '{key}': {len(loaders[key])} batches")
 
-    print("\n[OK] Data handler with 4-Set Protocol initialized successfully!")
+    # Print metadata
+    print(f"\n=== Dataset Metadata ===")
+    print(f"  Dataset: {handler.dataset_name}")
+    print(f"  Classes: {handler.n_classes}")
+    print(f"  Channels: {handler.n_channels}")
+
+    print("\n[OK] Data handler with multi-dataset support initialized successfully!")
 
 
 if __name__ == "__main__":

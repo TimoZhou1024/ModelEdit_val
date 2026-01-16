@@ -2,12 +2,20 @@
 Main Entry Point for ViT Model Editing Pipeline
 ================================================
 CLI interface for running all pipeline stages:
-- data: Load and split PathMNIST dataset
+- data: Load and split MedMNIST dataset
 - train: Fine-tune ViT on training set
 - locate: Find important layers for error samples (ASTRA)
 - edit: Apply weight edits (AlphaEdit)
 - eval: Evaluate on held-out set
 - full: Run complete pipeline
+
+Supported Datasets:
+- pathmnist: Colon Pathology (9 classes, RGB)
+- dermamnist: Dermatoscopy (7 classes, RGB) - Imbalanced
+- retinamnist: Retinal OCT (5 classes, RGB) - Fine-grained
+- organamnist: Abdominal CT (11 classes, Grayscale)
+- bloodmnist: Blood Cell Microscopy (8 classes, RGB)
+- tissuemnist: Kidney Cortex Microscopy (8 classes, Grayscale)
 """
 
 import argparse
@@ -23,7 +31,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from data_handler import DataHandler, PathMNISTDataset
+from data_handler import DataHandler, MedMNISTDataset, MEDMNIST_INFO
 from trainer import Trainer
 from locator import Locator
 from editor import Editor, AlphaEditHyperParams, HeadEditor, HeadEditHyperParams
@@ -53,7 +61,16 @@ Examples:
         choices=["data", "train", "locate", "edit", "eval", "full"],
         help="Pipeline stage to run"
     )
-    
+
+    # Dataset selection
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="pathmnist",
+        choices=list(MEDMNIST_INFO.keys()),
+        help="MedMNIST dataset to use (default: pathmnist)"
+    )
+
     # Data arguments
     parser.add_argument(
         "--data-path",
@@ -226,10 +243,11 @@ Examples:
 def run_data_stage(args):
     """Stage 1: Data preparation with 4-Set Protocol."""
     print("\n" + "=" * 70)
-    print("STAGE 1: DATA PREPARATION (4-Set Protocol)")
+    print(f"STAGE 1: DATA PREPARATION (4-Set Protocol) - {args.dataset.upper()}")
     print("=" * 70)
 
     handler = DataHandler(
+        dataset_name=args.dataset,
         data_path=args.data_path,
         ft_train_ratio=args.ft_train_ratio,
         random_seed=args.seed,
@@ -244,6 +262,8 @@ def run_data_stage(args):
     handler.export_split_info()
 
     print("\n[OK] Data preparation complete!")
+    print(f"  Dataset: {args.dataset}")
+    print(f"  Classes: {handler.n_classes}")
     print(f"  FT-Train samples: {len(handler.ft_train_indices)}")
     print(f"  Edit-Discovery samples: {len(handler.discovery_indices)}")
 
@@ -253,12 +273,13 @@ def run_data_stage(args):
 def run_train_stage(args, data_handler=None):
     """Stage 2: Fine-tune ViT on FT-Train set."""
     print("\n" + "=" * 70)
-    print("STAGE 2: FINE-TUNING (on FT-Train)")
+    print(f"STAGE 2: FINE-TUNING (on FT-Train) - {args.dataset.upper()}")
     print("=" * 70)
 
     # Get data handler
     if data_handler is None:
         data_handler = DataHandler(
+            dataset_name=args.dataset,
             data_path=args.data_path,
             ft_train_ratio=args.ft_train_ratio,
             random_seed=args.seed,
@@ -266,16 +287,19 @@ def run_train_stage(args, data_handler=None):
         )
         data_handler.load_data()
         data_handler.create_resplit()
-    
-    # Initialize trainer
+
+    # Initialize trainer with dynamic num_classes
     trainer = Trainer(
         checkpoint_dir=args.checkpoint_dir,
-        log_dir=args.log_dir
+        log_dir=args.log_dir,
+        num_classes=data_handler.n_classes,
+        dataset_name=args.dataset,
+        n_channels=data_handler.n_channels
     )
-    
+
     # Setup model
     trainer.setup_model()
-    
+
     # Resume if requested
     if args.resume:
         try:
@@ -283,7 +307,7 @@ def run_train_stage(args, data_handler=None):
             print("Resumed from checkpoint")
         except FileNotFoundError:
             print("No checkpoint found, starting fresh")
-    
+
     # Get transforms and dataloaders
     transform = trainer.get_transforms()
     dataloaders = data_handler.get_dataloaders(
@@ -291,7 +315,7 @@ def run_train_stage(args, data_handler=None):
         transform=transform,
         pin_memory=args.pin_memory
     )
-    
+
     # Train (on FT-Train set only!)
     results = trainer.train(
         train_loader=dataloaders['ft_train'],
@@ -302,15 +326,15 @@ def run_train_stage(args, data_handler=None):
 
     print("\n[OK] Fine-tuning complete!")
     print(f"  Best accuracy: {results['best_acc']:.2f}%")
-    print(f"  Checkpoint: {args.checkpoint_dir}/vit_pathmnist_finetuned.pt")
-    
+    print(f"  Checkpoint: {args.checkpoint_dir}/{trainer.checkpoint_name}")
+
     return trainer
 
 
 def run_locate_stage(args, trainer=None, data_handler=None):
     """Stage 3: Find important layers for error samples (ASTRA)."""
     print("\n" + "=" * 70)
-    print("STAGE 3: LAYER LOCALIZATION (ASTRA)")
+    print(f"STAGE 3: LAYER LOCALIZATION (ASTRA) - {args.dataset.upper()}")
     print("=" * 70)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -318,6 +342,7 @@ def run_locate_stage(args, trainer=None, data_handler=None):
     # Get data handler
     if data_handler is None:
         data_handler = DataHandler(
+            dataset_name=args.dataset,
             data_path=args.data_path,
             ft_train_ratio=args.ft_train_ratio,
             random_seed=args.seed,
@@ -325,10 +350,16 @@ def run_locate_stage(args, trainer=None, data_handler=None):
         )
         data_handler.load_data()
         data_handler.create_resplit()
-    
+
     # Get trainer/model
     if trainer is None:
-        trainer = Trainer(checkpoint_dir=args.checkpoint_dir, log_dir=args.log_dir)
+        trainer = Trainer(
+            checkpoint_dir=args.checkpoint_dir,
+            log_dir=args.log_dir,
+            num_classes=data_handler.n_classes,
+            dataset_name=args.dataset,
+            n_channels=data_handler.n_channels
+        )
         trainer.setup_model()
         trainer.load_checkpoint()
     
@@ -388,7 +419,7 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
     """Stage 4: Apply weight edits (AlphaEdit or Head Editing)."""
     method_name = "Head Editing" if args.edit_method == "head" else "AlphaEdit"
     print("\n" + "=" * 70)
-    print(f"STAGE 4: WEIGHT EDITING ({method_name})")
+    print(f"STAGE 4: WEIGHT EDITING ({method_name}) - {args.dataset.upper()}")
     print("=" * 70)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -396,6 +427,7 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
     # Get data handler
     if data_handler is None:
         data_handler = DataHandler(
+            dataset_name=args.dataset,
             data_path=args.data_path,
             ft_train_ratio=args.ft_train_ratio,
             random_seed=args.seed,
@@ -406,7 +438,13 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
 
     # Get trainer/model
     if trainer is None:
-        trainer = Trainer(checkpoint_dir=args.checkpoint_dir, log_dir=args.log_dir)
+        trainer = Trainer(
+            checkpoint_dir=args.checkpoint_dir,
+            log_dir=args.log_dir,
+            num_classes=data_handler.n_classes,
+            dataset_name=args.dataset,
+            n_channels=data_handler.n_channels
+        )
         trainer.setup_model()
         trainer.load_checkpoint()
 
@@ -449,7 +487,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
             model=trainer.model,
             device=device,
             hparams=hparams,
-            log_dir=args.log_dir
+            log_dir=args.log_dir,
+            dataset_name=args.dataset
         )
 
         # Compute Fisher information for EWC (skip if using closed-form)
@@ -514,7 +553,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
             model=trainer.model,
             device=device,
             hparams=hparams,
-            log_dir=args.log_dir
+            log_dir=args.log_dir,
+            dataset_name=args.dataset
         )
 
         # Precompute projection matrices
@@ -555,7 +595,7 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
 def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
     """Stage 5: Evaluate on Official Test Set (Comparative Evaluation)."""
     print("\n" + "=" * 70)
-    print("STAGE 5: EVALUATION (Official Test Set)")
+    print(f"STAGE 5: EVALUATION (Official Test Set) - {args.dataset.upper()}")
     print("=" * 70)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -563,6 +603,7 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
     # Get data handler
     if data_handler is None:
         data_handler = DataHandler(
+            dataset_name=args.dataset,
             data_path=args.data_path,
             ft_train_ratio=args.ft_train_ratio,
             random_seed=args.seed,
@@ -570,10 +611,16 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
         )
         data_handler.load_data()
         data_handler.create_resplit()
-    
+
     # Get transforms
     if trainer is None:
-        trainer = Trainer(checkpoint_dir=args.checkpoint_dir, log_dir=args.log_dir)
+        trainer = Trainer(
+            checkpoint_dir=args.checkpoint_dir,
+            log_dir=args.log_dir,
+            num_classes=data_handler.n_classes,
+            dataset_name=args.dataset,
+            n_channels=data_handler.n_channels
+        )
     
     if trainer.model is None:
         trainer.setup_model()
@@ -590,21 +637,33 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
     print("\n>>> EVALUATING ON OFFICIAL TEST SET <<<")
     print(">>> This set was NEVER used for training, validation, or editing <<<\n")
 
-    edited_path = Path(args.checkpoint_dir) / "vit_pathmnist_edited.pt"
-    finetuned_path = Path(args.checkpoint_dir) / "vit_pathmnist_finetuned.pt"
+    edited_path = Path(args.checkpoint_dir) / f"vit_{args.dataset}_edited.pt"
+    finetuned_path = Path(args.checkpoint_dir) / f"vit_{args.dataset}_finetuned.pt"
 
     # Case A: have both edited and finetuned checkpoints -> comparative evaluation
     if edited_path.exists() and finetuned_path.exists():
         print("Running COMPARATIVE EVALUATION on Official Test Set...")
 
         # Load baseline (before edit)
-        baseline_trainer = Trainer(checkpoint_dir=args.checkpoint_dir, log_dir=args.log_dir)
+        baseline_trainer = Trainer(
+            checkpoint_dir=args.checkpoint_dir,
+            log_dir=args.log_dir,
+            num_classes=data_handler.n_classes,
+            dataset_name=args.dataset,
+            n_channels=data_handler.n_channels
+        )
         baseline_trainer.setup_model()
         baseline_trainer.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
         model_before = baseline_trainer.model
 
         # Load edited model
-        edited_trainer = Trainer(checkpoint_dir=args.checkpoint_dir, log_dir=args.log_dir)
+        edited_trainer = Trainer(
+            checkpoint_dir=args.checkpoint_dir,
+            log_dir=args.log_dir,
+            num_classes=data_handler.n_classes,
+            dataset_name=args.dataset,
+            n_channels=data_handler.n_channels
+        )
         edited_trainer.setup_model()
         checkpoint = torch.load(edited_path, map_location=device)
         edited_trainer.model.load_state_dict(checkpoint['model_state_dict'])
@@ -663,14 +722,14 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
 def run_full_pipeline(args):
     """Run complete pipeline from start to finish (4-Set Protocol)."""
     print("\n" + "=" * 70)
-    print("RUNNING COMPLETE PIPELINE (4-Set Protocol)")
+    print(f"RUNNING COMPLETE PIPELINE (4-Set Protocol) - {args.dataset.upper()}")
     print("=" * 70)
 
     # Stage 1: Data
     data_handler = run_data_stage(args)
 
     # Stage 2: Training (skip if checkpoint exists)
-    checkpoint_path = Path(args.checkpoint_dir) / "vit_pathmnist_finetuned.pt"
+    checkpoint_path = Path(args.checkpoint_dir) / f"vit_{args.dataset}_finetuned.pt"
     if checkpoint_path.exists():
         print("\n" + "=" * 70)
         print("STAGE 2: FINE-TUNING (SKIPPED - checkpoint found)")
@@ -679,7 +738,10 @@ def run_full_pipeline(args):
 
         trainer = Trainer(
             checkpoint_dir=args.checkpoint_dir,
-            log_dir=args.log_dir
+            log_dir=args.log_dir,
+            num_classes=data_handler.n_classes,
+            dataset_name=args.dataset,
+            n_channels=data_handler.n_channels
         )
         trainer.setup_model()
         trainer.load_checkpoint(filepath=checkpoint_path, load_optimizer=False)
@@ -727,6 +789,16 @@ def main():
         args.log_dir = f"{args.log_dir}/{suffix}"
         args.results_dir = f"{args.results_dir}/{suffix}"
         print(f"Run identifier: {suffix}")
+
+    # Print dataset info
+    print(f"\n{'=' * 70}")
+    print(f"ViT Model Editing Pipeline - {args.dataset.upper()}")
+    print(f"{'=' * 70}")
+    dataset_info = MEDMNIST_INFO[args.dataset]
+    print(f"  Dataset: {args.dataset}")
+    print(f"  Classes: {dataset_info['n_classes']}")
+    print(f"  Channels: {dataset_info['n_channels']} ({'Grayscale' if dataset_info['n_channels'] == 1 else 'RGB'})")
+    print(f"  Description: {dataset_info['description']}")
 
     # Create output directories
     Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)

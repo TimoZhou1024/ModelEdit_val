@@ -1,6 +1,19 @@
 # ViT Model Editing Pipeline
 
-Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for correcting misclassified samples on MedMNIST (PathMNIST).
+Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for correcting misclassified samples on MedMNIST datasets.
+
+## Supported Datasets
+
+| Dataset | Classes | Channels | Task Type | Description |
+|---------|---------|----------|-----------|-------------|
+| **pathmnist** | 9 | RGB | Multi-class | Colon Pathology - 9 tissue types |
+| **dermamnist** | 7 | RGB | Multi-class | Dermatoscopy - 7 skin lesion types (Imbalanced) |
+| **retinamnist** | 5 | RGB | Ordinal | Retinal Fundus - 5 diabetic retinopathy grades (Fine-grained) |
+| **organamnist** | 11 | Grayscale | Multi-class | Abdominal CT - 11 organ types (Shape-based) |
+| **bloodmnist** | 8 | RGB | Multi-class | Blood Cell Microscopy - 8 cell types |
+| **tissuemnist** | 8 | Grayscale | Multi-class | Kidney Cortex Microscopy - 8 tissue types |
+
+**Note**: Grayscale datasets are automatically converted to 3-channel RGB for ViT compatibility.
 
 ## Project Goal
 
@@ -15,22 +28,22 @@ Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for c
 ```
 E:\ModelEdit_val\
 ├── src/
-│   ├── data_handler.py      # 4-Set Protocol: FT-Train/Edit-Discovery/FT-Val/Test
-│   ├── trainer.py           # ViT fine-tuning with auto GPU/CPU + checkpointing
+│   ├── data_handler.py      # Multi-dataset support + 4-Set Protocol
+│   ├── trainer.py           # ViT fine-tuning with dynamic num_classes
 │   ├── locator.py           # ASTRA-style causal tracing for layer importance
-│   ├── editor.py            # AlphaEdit + HeadEditor (dual dataloader support)
+│   ├── editor.py            # AlphaEdit + HeadEditor (multi-dataset support)
 │   ├── evaluator.py         # Comparative evaluation on Official Test Set
-│   └── main.py              # CLI entry point (4-Set Protocol)
+│   └── main.py              # CLI entry point (--dataset argument)
 ├── checkpoints/
-│   ├── vit_pathmnist_finetuned.pt      # Fine-tuned model
-│   ├── vit_pathmnist_edited.pt         # AlphaEdit edited model
-│   ├── vit_pathmnist_head_edited.pt    # Head edited model
-│   └── projection_cache.pt             # Cached null-space projections
+│   ├── vit_{dataset}_finetuned.pt     # Fine-tuned model (per dataset)
+│   ├── vit_{dataset}_edited.pt        # AlphaEdit edited model
+│   ├── vit_{dataset}_head_edited.pt   # Head edited model
+│   └── projection_cache.pt            # Cached null-space projections
 ├── logs/
 │   └── {timestamp}/                 # Timestamped run logs
-│       ├── split_indices.pt         # Saved split indices (reproducibility)
-│       ├── data_split_info.csv      # 4-Set Protocol statistics
-│       ├── training_metrics.csv     # Training loss/accuracy per epoch
+│       ├── {dataset}_split_indices.pt    # Saved split indices
+│       ├── {dataset}_data_split_info.csv # 4-Set Protocol statistics
+│       ├── {dataset}_training_metrics.csv # Training loss/accuracy
 │       ├── layer_importance.csv     # Per-sample causal tracing scores
 │       ├── layer_statistics.csv     # Aggregated layer statistics
 │       ├── edit_log.csv             # AlphaEdit records
@@ -79,23 +92,39 @@ source .venv/bin/activate
 
 ### Data Location
 
-PathMNIST should be at: `~/.medmnist/pathmnist_224.npz`
+MedMNIST datasets should be at: `~/.medmnist/{dataset}_224.npz`
+
+Download from: https://medmnist.com/
+
+```bash
+# Example paths:
+~/.medmnist/pathmnist_224.npz
+~/.medmnist/dermamnist_224.npz
+~/.medmnist/retinamnist_224.npz
+~/.medmnist/organamnist_224.npz
+~/.medmnist/bloodmnist_224.npz
+~/.medmnist/tissuemnist_224.npz
+```
 
 ### Running the Pipeline
 
 ```bash
-# Run complete pipeline with timestamp (recommended)
+# Run complete pipeline with default dataset (pathmnist)
 uv run python src/main.py --stage full --timestamp
 
+# Run with a specific dataset
+uv run python src/main.py --stage full --dataset dermamnist --timestamp
+uv run python src/main.py --stage full --dataset organamnist --timestamp
+
 # Run with custom run name
-uv run python src/main.py --stage full --run-name experiment_v1
+uv run python src/main.py --stage full --dataset pathmnist --run-name experiment_v1
 
 # Run individual stages
-uv run python src/main.py --stage data
-uv run python src/main.py --stage train --epochs 10
-uv run python src/main.py --stage locate
-uv run python src/main.py --stage edit
-uv run python src/main.py --stage eval
+uv run python src/main.py --stage data --dataset dermamnist
+uv run python src/main.py --stage train --dataset dermamnist --epochs 10
+uv run python src/main.py --stage locate --dataset dermamnist
+uv run python src/main.py --stage edit --dataset dermamnist
+uv run python src/main.py --stage eval --dataset dermamnist
 ```
 
 ## Pipeline Stages
@@ -191,10 +220,15 @@ Runs **Comparative Evaluation** on **Official Test Set** (4-Set Protocol):
 |----------|-------------|
 | `--stage` | Pipeline stage: `data`, `train`, `locate`, `edit`, `eval`, `full` |
 
+### Dataset Selection
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--dataset` | `pathmnist` | MedMNIST dataset: `pathmnist`, `dermamnist`, `retinamnist`, `organamnist`, `bloodmnist`, `tissuemnist` |
+
 ### Data Options
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--data-path` | `~/.medmnist/pathmnist_224.npz` | PathMNIST data file |
+| `--data-path` | `~/.medmnist/{dataset}_224.npz` | MedMNIST data file |
 | `--ft-train-ratio` | 0.9 | Fraction of official train for FT-Train (remaining goes to Edit-Discovery) |
 | `--seed` | 42 | Random seed for reproducibility |
 
@@ -253,30 +287,39 @@ The pipeline determines which layers to edit using this priority:
 ### Examples
 
 ```bash
+# === Default Dataset (PathMNIST) ===
 # AlphaEdit with ASTRA results, edit top 3 layers (default)
 uv run python src/main.py --stage full
 
+# === Multi-Dataset Examples ===
+# DermaMNIST (Imbalanced skin lesion classification)
+uv run python src/main.py --stage full --dataset dermamnist --timestamp
+
+# OrganAMNIST (Grayscale CT organ classification)
+uv run python src/main.py --stage full --dataset organamnist --timestamp
+
+# RetinaMNIST (Fine-grained diabetic retinopathy grading)
+uv run python src/main.py --stage full --dataset retinamnist --timestamp
+
+# === Editing Method Options ===
 # AlphaEdit with ASTRA results, edit top 5 layers
-uv run python src/main.py --stage full --num-edit-layers 5
+uv run python src/main.py --stage full --dataset dermamnist --num-edit-layers 5
 
 # AlphaEdit with manually specified layers
-uv run python src/main.py --stage full --edit-layers 4 5 6
+uv run python src/main.py --stage full --dataset dermamnist --edit-layers 4 5 6
 
 # Head Editing (simpler, faster)
-uv run python src/main.py --stage full --edit-method head
+uv run python src/main.py --stage full --dataset organamnist --edit-method head
 
 # Head Editing with custom parameters
-uv run python src/main.py --stage full --edit-method head --head-lr 0.005 --head-steps 100
+uv run python src/main.py --stage full --dataset organamnist --edit-method head --head-lr 0.005
 
 # Head Editing with closed-form solution (fastest)
-uv run python src/main.py --stage full --edit-method head --closed-form
+uv run python src/main.py --stage full --dataset organamnist --edit-method head --closed-form
 
-# Compare both methods
-uv run python src/main.py --stage full --edit-method alphaedit --run-name compare_alpha
-uv run python src/main.py --stage full --edit-method head --run-name compare_head
-
-# With timestamp for preserving results
-uv run python src/main.py --stage full --timestamp --edit-method head
+# === Compare Methods Across Datasets ===
+uv run python src/main.py --stage full --dataset dermamnist --edit-method alphaedit --run-name derma_alpha
+uv run python src/main.py --stage full --dataset dermamnist --edit-method head --run-name derma_head
 ```
 
 ## Technical Details
@@ -370,6 +413,19 @@ Where:
 The null-space projection P ensures edits don't affect predictions for correctly classified samples.
 
 ## Changelog
+
+### v1.5.0 (2026-01-16)
+- **Multi-Dataset Support**: Pipeline now supports multiple MedMNIST datasets
+  - PathMNIST (9 classes, RGB) - Colon Pathology
+  - DermaMNIST (7 classes, RGB) - Dermatoscopy (Imbalanced)
+  - RetinaMNIST (5 classes, RGB) - Retinal OCT (Fine-grained)
+  - OrganAMNIST (11 classes, Grayscale) - Abdominal CT
+  - BloodMNIST (8 classes, RGB) - Blood Cell Microscopy
+  - TissueMNIST (8 classes, Grayscale) - Kidney Cortex Microscopy
+- **Grayscale Handling**: Automatic conversion to 3-channel RGB for ViT compatibility
+- **Dynamic num_classes**: Model head size adapts to dataset
+- **Dataset-specific checkpoints**: `vit_{dataset}_finetuned.pt`, `vit_{dataset}_edited.pt`
+- **New argument**: `--dataset` to select MedMNIST dataset
 
 ### v1.4.0 (2026-01-16)
 - **4-Set Protocol**: Implemented strict data isolation strategy
