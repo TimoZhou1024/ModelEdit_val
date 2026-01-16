@@ -27,7 +27,7 @@ from data_handler import DataHandler, PathMNISTDataset
 from trainer import Trainer
 from locator import Locator
 from editor import Editor, AlphaEditHyperParams, HeadEditor, HeadEditHyperParams
-from evaluator import Evaluator, evaluate_before_after
+from evaluator import Evaluator, evaluate_before_after, evaluate_comparative
 
 
 def parse_args():
@@ -62,10 +62,10 @@ Examples:
         help="Path to pathmnist_224.npz (default: ~/.medmnist/pathmnist_224.npz)"
     )
     parser.add_argument(
-        "--held-out-ratio",
+        "--ft-train-ratio",
         type=float,
-        default=0.2,
-        help="Fraction of data for held-out validation (default: 0.2)"
+        default=0.9,
+        help="Fraction of official train for FT-Train (default: 0.9, remaining goes to Edit-Discovery)"
     )
     parser.add_argument(
         "--seed",
@@ -224,48 +224,48 @@ Examples:
 
 
 def run_data_stage(args):
-    """Stage 1: Data preparation with strict isolation."""
+    """Stage 1: Data preparation with 4-Set Protocol."""
     print("\n" + "=" * 70)
-    print("STAGE 1: DATA PREPARATION")
+    print("STAGE 1: DATA PREPARATION (4-Set Protocol)")
     print("=" * 70)
-    
+
     handler = DataHandler(
         data_path=args.data_path,
-        held_out_ratio=args.held_out_ratio,
+        ft_train_ratio=args.ft_train_ratio,
         random_seed=args.seed,
         log_dir=args.log_dir
     )
-    
-    # Load and split
+
+    # Load and create re-split
     handler.load_data()
-    handler.create_held_out_split()
-    
+    handler.create_resplit()
+
     # Export info
     handler.export_split_info()
-    
-    print("\n✓ Data preparation complete!")
-    print(f"  Training samples: {len(handler.train_indices)}")
-    print(f"  Held-out samples: {len(handler.held_out_indices)}")
-    
+
+    print("\n[OK] Data preparation complete!")
+    print(f"  FT-Train samples: {len(handler.ft_train_indices)}")
+    print(f"  Edit-Discovery samples: {len(handler.discovery_indices)}")
+
     return handler
 
 
 def run_train_stage(args, data_handler=None):
-    """Stage 2: Fine-tune ViT on training set."""
+    """Stage 2: Fine-tune ViT on FT-Train set."""
     print("\n" + "=" * 70)
-    print("STAGE 2: FINE-TUNING")
+    print("STAGE 2: FINE-TUNING (on FT-Train)")
     print("=" * 70)
-    
+
     # Get data handler
     if data_handler is None:
         data_handler = DataHandler(
             data_path=args.data_path,
-            held_out_ratio=args.held_out_ratio,
+            ft_train_ratio=args.ft_train_ratio,
             random_seed=args.seed,
             log_dir=args.log_dir
         )
         data_handler.load_data()
-        data_handler.create_held_out_split()
+        data_handler.create_resplit()
     
     # Initialize trainer
     trainer = Trainer(
@@ -292,15 +292,15 @@ def run_train_stage(args, data_handler=None):
         pin_memory=args.pin_memory
     )
     
-    # Train (on training set only!)
+    # Train (on FT-Train set only!)
     results = trainer.train(
-        train_loader=dataloaders['train'],
+        train_loader=dataloaders['ft_train'],
         val_loader=dataloaders['val'],
         epochs=args.epochs,
         learning_rate=args.lr
     )
-    
-    print("\n✓ Fine-tuning complete!")
+
+    print("\n[OK] Fine-tuning complete!")
     print(f"  Best accuracy: {results['best_acc']:.2f}%")
     print(f"  Checkpoint: {args.checkpoint_dir}/vit_pathmnist_finetuned.pt")
     
@@ -312,19 +312,19 @@ def run_locate_stage(args, trainer=None, data_handler=None):
     print("\n" + "=" * 70)
     print("STAGE 3: LAYER LOCALIZATION (ASTRA)")
     print("=" * 70)
-    
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     # Get data handler
     if data_handler is None:
         data_handler = DataHandler(
             data_path=args.data_path,
-            held_out_ratio=args.held_out_ratio,
+            ft_train_ratio=args.ft_train_ratio,
             random_seed=args.seed,
             log_dir=args.log_dir
         )
         data_handler.load_data()
-        data_handler.create_held_out_split()
+        data_handler.create_resplit()
     
     # Get trainer/model
     if trainer is None:
@@ -339,10 +339,10 @@ def run_locate_stage(args, trainer=None, data_handler=None):
         pin_memory=args.pin_memory
     )
     
-    # Find misclassified samples from training set
-    print("\nFinding misclassified samples...")
+    # Find misclassified samples from Edit-Discovery set (unseen errors)
+    print("\nFinding misclassified samples from Edit-Discovery set...")
     misclassified = trainer.find_misclassified(
-        dataloaders['train'],
+        dataloaders['discovery'],
         max_samples=args.max_samples
     )
     
@@ -358,11 +358,11 @@ def run_locate_stage(args, trainer=None, data_handler=None):
         num_layers=12  # Analyze all layers
     )
     
-    # Analyze samples
-    train_dataset = data_handler.get_train_dataset(transform)
-    
+    # Analyze samples from Edit-Discovery set
+    discovery_dataset = data_handler.get_discovery_dataset(transform)
+
     for i, idx in enumerate(tqdm(misclassified['indices'][:args.max_samples], desc="Analyzing")):
-        image, label = train_dataset[idx]
+        image, label = discovery_dataset[idx]
         pred = misclassified['predictions'][i]
         
         locator.analyze_sample(
@@ -397,12 +397,12 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
     if data_handler is None:
         data_handler = DataHandler(
             data_path=args.data_path,
-            held_out_ratio=args.held_out_ratio,
+            ft_train_ratio=args.ft_train_ratio,
             random_seed=args.seed,
             log_dir=args.log_dir
         )
         data_handler.load_data()
-        data_handler.create_held_out_split()
+        data_handler.create_resplit()
 
     # Get trainer/model
     if trainer is None:
@@ -417,11 +417,11 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         pin_memory=args.pin_memory
     )
 
-    # Find misclassified if not provided
+    # Find misclassified from Edit-Discovery set if not provided
     if misclassified is None:
-        print("\nFinding misclassified samples...")
+        print("\nFinding misclassified samples from Edit-Discovery set...")
         misclassified = trainer.find_misclassified(
-            dataloaders['train'],
+            dataloaders['discovery'],
             max_samples=args.max_edits
         )
 
@@ -453,21 +453,23 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         )
 
         # Compute Fisher information for EWC (skip if using closed-form)
+        # IMPORTANT: Use FT-Train (stats_loader) for Fisher computation!
         if not args.closed_form:
-            print("\nComputing Fisher information for EWC regularization...")
+            print("\nComputing Fisher information for EWC (using FT-Train)...")
             editor.compute_fisher_information(
-                dataloader=dataloaders['train'],
+                stats_loader=dataloaders['ft_train'],
                 num_samples=500
             )
 
         # Apply batch edit (head editing processes all samples together)
-        train_dataset = data_handler.get_train_dataset(transform)
+        # IMPORTANT: Use Edit-Discovery set for finding targets!
+        discovery_dataset = data_handler.get_discovery_dataset(transform)
         edit_indices = misclassified['indices'][:args.max_edits]
 
         images_list = []
         labels_list = []
         for idx in edit_indices:
-            image, label = train_dataset[idx]
+            image, label = discovery_dataset[idx]
             images_list.append(image)
             labels_list.append(label)
 
@@ -516,18 +518,20 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         )
 
         # Precompute projection matrices
-        print("\nPrecomputing null-space projections...")
+        # IMPORTANT: Use FT-Train (stats_loader) for covariance computation!
+        print("\nPrecomputing null-space projections (using FT-Train for stats)...")
         editor.precompute_projection(
-            dataloader=dataloaders['train'],
+            stats_loader=dataloaders['ft_train'],
             num_samples=500
         )
 
         # Apply edits one by one
-        train_dataset = data_handler.get_train_dataset(transform)
+        # IMPORTANT: Use Edit-Discovery set for finding targets!
+        discovery_dataset = data_handler.get_discovery_dataset(transform)
         edit_indices = misclassified['indices'][:args.max_edits]
 
         for idx in tqdm(edit_indices, desc="Applying edits"):
-            image, label = train_dataset[idx]
+            image, label = discovery_dataset[idx]
             image = image.unsqueeze(0)
             label_tensor = torch.tensor([label])
 
@@ -549,23 +553,23 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
 
 
 def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
-    """Stage 5: Evaluate on held-out validation set."""
+    """Stage 5: Evaluate on Official Test Set (Comparative Evaluation)."""
     print("\n" + "=" * 70)
-    print("STAGE 5: EVALUATION")
+    print("STAGE 5: EVALUATION (Official Test Set)")
     print("=" * 70)
-    
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     # Get data handler
     if data_handler is None:
         data_handler = DataHandler(
             data_path=args.data_path,
-            held_out_ratio=args.held_out_ratio,
+            ft_train_ratio=args.ft_train_ratio,
             random_seed=args.seed,
             log_dir=args.log_dir
         )
         data_handler.load_data()
-        data_handler.create_held_out_split()
+        data_handler.create_resplit()
     
     # Get transforms
     if trainer is None:
@@ -582,16 +586,16 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
         pin_memory=args.pin_memory
     )
     
-    # Evaluate on HELD-OUT set (critical: this is the only valid evaluation)
-    print("\n>>> EVALUATING ON HELD-OUT VALIDATION SET <<<")
-    print(">>> This set was strictly excluded from training and editing <<<\n")
+    # Evaluate on OFFICIAL TEST SET (4-Set Protocol)
+    print("\n>>> EVALUATING ON OFFICIAL TEST SET <<<")
+    print(">>> This set was NEVER used for training, validation, or editing <<<\n")
 
     edited_path = Path(args.checkpoint_dir) / "vit_pathmnist_edited.pt"
     finetuned_path = Path(args.checkpoint_dir) / "vit_pathmnist_finetuned.pt"
 
-    # Case A: have both edited and finetuned checkpoints -> compare before/after
+    # Case A: have both edited and finetuned checkpoints -> comparative evaluation
     if edited_path.exists() and finetuned_path.exists():
-        print("Detected both edited and fine-tuned checkpoints; running BEFORE vs AFTER comparison...")
+        print("Running COMPARATIVE EVALUATION on Official Test Set...")
 
         # Load baseline (before edit)
         baseline_trainer = Trainer(checkpoint_dir=args.checkpoint_dir, log_dir=args.log_dir)
@@ -606,10 +610,11 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
         edited_trainer.model.load_state_dict(checkpoint['model_state_dict'])
         model_after = edited_trainer.model
 
-        evaluate_before_after(
-            model_before=model_before,
-            model_after=model_after,
-            dataloader=dataloaders['held_out'],
+        # Run comparative evaluation on Official Test Set
+        evaluate_comparative(
+            model_orig=model_before,
+            model_edit=model_after,
+            test_loader=dataloaders['test'],
             device=device,
             results_dir=args.results_dir
         )
@@ -636,7 +641,7 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
         log_dir=args.log_dir
     )
 
-    evaluator.run_inference(dataloaders['held_out'], desc="Held-Out Eval")
+    evaluator.run_inference(dataloaders['test'], desc="Test Set Eval")
 
     # Generate reports
     evaluator.print_summary()
@@ -649,16 +654,16 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
     except Exception as e:
         print(f"Warning: Could not plot confusion matrix: {e}")
 
-    print(f"\n✓ Evaluation complete!")
+    print(f"\n[OK] Evaluation complete!")
     print(f"  Results saved to: {args.results_dir}/")
 
     return evaluator
 
 
 def run_full_pipeline(args):
-    """Run complete pipeline from start to finish."""
+    """Run complete pipeline from start to finish (4-Set Protocol)."""
     print("\n" + "=" * 70)
-    print("RUNNING COMPLETE PIPELINE")
+    print("RUNNING COMPLETE PIPELINE (4-Set Protocol)")
     print("=" * 70)
 
     # Stage 1: Data

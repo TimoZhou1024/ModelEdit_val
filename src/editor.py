@@ -478,18 +478,27 @@ class Editor:
     
     def precompute_projection(
         self,
-        dataloader: torch.utils.data.DataLoader,
+        stats_loader: torch.utils.data.DataLoader,
         num_samples: int = 1000
     ):
         """
         Precompute null-space projection matrices for all target layers.
+
+        IMPORTANT (4-Set Protocol):
+        - stats_loader MUST be FT-Train loader (90% of official train)
+        - This computes covariance K^T K for knowledge preservation
+        - NEVER use Edit-Discovery loader here!
+
+        Args:
+            stats_loader: DataLoader for FT-Train set (for covariance computation)
+            num_samples: Number of samples to collect for statistics
         """
-        print("\nPrecomputing projection matrices...")
+        print("\nPrecomputing projection matrices (using FT-Train for stats)...")
         
         for layer in tqdm(self.hparams.layers, desc="Layers"):
             P = self.projector.compute_from_random_samples(
                 model=self.model,
-                dataloader=dataloader,
+                dataloader=stats_loader,
                 layer=layer,
                 hparams=self.hparams,
                 device=self.device,
@@ -775,17 +784,26 @@ class HeadEditor:
 
     def compute_fisher_information(
         self,
-        dataloader: torch.utils.data.DataLoader,
+        stats_loader: torch.utils.data.DataLoader,
         num_samples: int = None
     ):
         """
         Compute diagonal Fisher information matrix for classifier weights.
         Used for EWC regularization to preserve knowledge.
+
+        IMPORTANT (4-Set Protocol):
+        - stats_loader MUST be FT-Train loader (90% of official train)
+        - This computes Fisher information for knowledge preservation
+        - NEVER use Edit-Discovery loader here!
+
+        Args:
+            stats_loader: DataLoader for FT-Train set (for Fisher computation)
+            num_samples: Number of samples to use (default: hparams.fisher_samples)
         """
         if num_samples is None:
             num_samples = self.hparams.fisher_samples
 
-        print(f"\nComputing Fisher information from {num_samples} samples...")
+        print(f"\nComputing Fisher information from {num_samples} samples (FT-Train)...")
         self.model.eval()
 
         # Store original weights
@@ -797,7 +815,7 @@ class HeadEditor:
         self.fisher_bias = torch.zeros_like(self.model.classifier.bias)
 
         count = 0
-        for images, labels in tqdm(dataloader, desc="Computing Fisher"):
+        for images, labels in tqdm(stats_loader, desc="Computing Fisher"):
             if count >= num_samples:
                 break
 

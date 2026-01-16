@@ -568,6 +568,192 @@ def evaluate_before_after(
     return comparison
 
 
+def evaluate_comparative(
+    model_orig: nn.Module,
+    model_edit: nn.Module,
+    test_loader: torch.utils.data.DataLoader,
+    device: torch.device = None,
+    results_dir: str = "results"
+) -> Dict[str, Any]:
+    """
+    Comparative Evaluation on Official Test Set (4-Set Protocol).
+
+    This is the FINAL evaluation that compares Pre-Edit vs Post-Edit models
+    on the Official Test Set, which was NEVER used for training or editing.
+
+    Args:
+        model_orig: Original model (before editing)
+        model_edit: Edited model (after editing)
+        test_loader: DataLoader for Official Test Set
+        device: Computation device
+        results_dir: Directory for saving results
+
+    Returns:
+        Dictionary with comparative metrics:
+        - accuracy_delta: Change in accuracy (positive = improvement)
+        - stability: Fraction of correct samples that remained correct
+        - fix_rate: Fraction of error samples that became correct
+        - regression_rate: Fraction of correct samples that became wrong
+        - confusion_matrices: Before and after confusion matrices
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n" + "=" * 70)
+    print("COMPARATIVE EVALUATION ON OFFICIAL TEST SET")
+    print("(4-Set Protocol: Final Pre-Edit vs Post-Edit Comparison)")
+    print("=" * 70)
+
+    # Collect predictions from both models
+    model_orig.eval()
+    model_edit.eval()
+
+    all_labels = []
+    preds_orig = []
+    preds_edit = []
+    probs_orig = []
+    probs_edit = []
+
+    with torch.no_grad():
+        for images, labels in tqdm(test_loader, desc="Evaluating on Test Set"):
+            images = images.to(device)
+
+            # Original model predictions
+            out_orig = model_orig(images)
+            logits_orig = out_orig.logits
+            prob_orig = torch.softmax(logits_orig, dim=-1)
+
+            # Edited model predictions
+            out_edit = model_edit(images)
+            logits_edit = out_edit.logits
+            prob_edit = torch.softmax(logits_edit, dim=-1)
+
+            all_labels.extend(labels.numpy())
+            preds_orig.extend(logits_orig.argmax(dim=1).cpu().numpy())
+            preds_edit.extend(logits_edit.argmax(dim=1).cpu().numpy())
+            probs_orig.extend(prob_orig.cpu().numpy())
+            probs_edit.extend(prob_edit.cpu().numpy())
+
+    # Convert to numpy arrays
+    all_labels = np.array(all_labels)
+    preds_orig = np.array(preds_orig)
+    preds_edit = np.array(preds_edit)
+
+    # Compute basic accuracy metrics
+    acc_orig = accuracy_score(all_labels, preds_orig)
+    acc_edit = accuracy_score(all_labels, preds_edit)
+    accuracy_delta = acc_edit - acc_orig
+
+    # Compute stability and fix rate
+    correct_orig = (preds_orig == all_labels)
+    correct_edit = (preds_edit == all_labels)
+
+    # Stability: samples that were correct and remained correct
+    stable_mask = correct_orig & correct_edit
+    stability = stable_mask.sum() / correct_orig.sum() if correct_orig.sum() > 0 else 0.0
+
+    # Fix Rate: samples that were wrong and became correct
+    error_orig = ~correct_orig
+    fixed_mask = error_orig & correct_edit
+    fix_rate = fixed_mask.sum() / error_orig.sum() if error_orig.sum() > 0 else 0.0
+
+    # Regression Rate: samples that were correct and became wrong
+    regression_mask = correct_orig & ~correct_edit
+    regression_rate = regression_mask.sum() / correct_orig.sum() if correct_orig.sum() > 0 else 0.0
+
+    # Confusion matrices
+    cm_orig = confusion_matrix(all_labels, preds_orig)
+    cm_edit = confusion_matrix(all_labels, preds_edit)
+
+    # Detailed transition analysis
+    n_total = len(all_labels)
+    n_correct_orig = correct_orig.sum()
+    n_error_orig = error_orig.sum()
+    n_correct_edit = correct_edit.sum()
+    n_fixed = fixed_mask.sum()
+    n_regressed = regression_mask.sum()
+    n_stable = stable_mask.sum()
+
+    # Build result dictionary
+    result = {
+        'accuracy_orig': acc_orig,
+        'accuracy_edit': acc_edit,
+        'accuracy_delta': accuracy_delta,
+        'stability': stability,
+        'fix_rate': fix_rate,
+        'regression_rate': regression_rate,
+        'n_total': n_total,
+        'n_correct_orig': int(n_correct_orig),
+        'n_error_orig': int(n_error_orig),
+        'n_correct_edit': int(n_correct_edit),
+        'n_fixed': int(n_fixed),
+        'n_regressed': int(n_regressed),
+        'n_stable': int(n_stable),
+        'confusion_matrix_orig': cm_orig,
+        'confusion_matrix_edit': cm_edit
+    }
+
+    # Print summary
+    print(f"\n=== Comparative Evaluation Results ===")
+    print(f"Test Set Size: {n_total} samples")
+    print(f"\nAccuracy:")
+    print(f"  Pre-Edit:  {acc_orig*100:.2f}% ({n_correct_orig}/{n_total})")
+    print(f"  Post-Edit: {acc_edit*100:.2f}% ({n_correct_edit}/{n_total})")
+    print(f"  Delta:     {accuracy_delta*100:+.2f}%")
+
+    print(f"\nTransition Analysis:")
+    print(f"  Stability (correct->correct): {stability*100:.1f}% ({n_stable}/{n_correct_orig})")
+    print(f"  Fix Rate (error->correct):    {fix_rate*100:.1f}% ({n_fixed}/{n_error_orig})")
+    print(f"  Regression (correct->error):  {regression_rate*100:.1f}% ({n_regressed}/{n_correct_orig})")
+
+    print(f"\nJudgment Indicators:")
+    print(f"  [{'PASS' if accuracy_delta > 0 else 'FAIL'}] Accuracy improved")
+    print(f"  [{'PASS' if stability > 0.95 else 'WARN' if stability > 0.90 else 'FAIL'}] Stability > 95%")
+    print(f"  [{'PASS' if fix_rate > 0 else 'INFO'}] Some errors fixed")
+    print(f"  [{'PASS' if regression_rate < 0.05 else 'WARN' if regression_rate < 0.10 else 'FAIL'}] Regression < 5%")
+
+    # Export results to CSV
+    summary_rows = [
+        {'metric': 'accuracy_orig', 'value': acc_orig, 'notes': f'{acc_orig*100:.2f}%'},
+        {'metric': 'accuracy_edit', 'value': acc_edit, 'notes': f'{acc_edit*100:.2f}%'},
+        {'metric': 'accuracy_delta', 'value': accuracy_delta, 'notes': f'{accuracy_delta*100:+.2f}%'},
+        {'metric': 'stability', 'value': stability, 'notes': f'{n_stable}/{n_correct_orig}'},
+        {'metric': 'fix_rate', 'value': fix_rate, 'notes': f'{n_fixed}/{n_error_orig}'},
+        {'metric': 'regression_rate', 'value': regression_rate, 'notes': f'{n_regressed}/{n_correct_orig}'},
+        {'metric': 'n_total', 'value': n_total, 'notes': 'test set size'},
+        {'metric': 'n_fixed', 'value': n_fixed, 'notes': 'errors corrected'},
+        {'metric': 'n_regressed', 'value': n_regressed, 'notes': 'new errors introduced'},
+    ]
+
+    df_summary = pd.DataFrame(summary_rows)
+    summary_path = results_dir / 'comparative_evaluation.csv'
+    df_summary.to_csv(summary_path, index=False)
+    print(f"\nResults exported to: {summary_path}")
+
+    # Export confusion matrices
+    class_names = Evaluator.CLASS_NAMES
+    df_cm_orig = pd.DataFrame(
+        cm_orig,
+        index=[f"True_{i}" for i in range(len(class_names))],
+        columns=[f"Pred_{i}" for i in range(len(class_names))]
+    )
+    df_cm_edit = pd.DataFrame(
+        cm_edit,
+        index=[f"True_{i}" for i in range(len(class_names))],
+        columns=[f"Pred_{i}" for i in range(len(class_names))]
+    )
+
+    df_cm_orig.to_csv(results_dir / 'confusion_matrix_orig.csv')
+    df_cm_edit.to_csv(results_dir / 'confusion_matrix_edit.csv')
+
+    print("=" * 70)
+
+    return result
+
+
 def main():
     """Test evaluator functionality."""
     print("=" * 70)

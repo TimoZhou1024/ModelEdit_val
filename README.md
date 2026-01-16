@@ -4,23 +4,23 @@ Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for c
 
 ## Project Goal
 
-1. **Data Splitting**: Rigorously isolate a "Held-Out Validation Set" before any training
-2. **Fine-tuning**: Train `vit-base-patch16-224` on PathMNIST
-3. **Locate Layers**: Use **ASTRA-style Causal Tracing** to identify significant layers for error samples
+1. **Data Splitting (4-Set Protocol)**: Implement strict data isolation with FT-Train, Edit-Discovery, FT-Val, and Test Set
+2. **Fine-tuning**: Train `vit-base-patch16-224` on FT-Train set
+3. **Locate Layers**: Use **ASTRA-style Causal Tracing** on Edit-Discovery set to identify significant layers
 4. **Edit Weights**: Apply **AlphaEdit** (MLP layers) or **Head Editing** (classifier only) to correct errors
-5. **Evaluate**: Generate Confusion Matrix and Accuracy using the Held-Out set
+5. **Evaluate**: Run **Comparative Evaluation** on Official Test Set (Pre-Edit vs Post-Edit)
 
 ## Project Structure
 
 ```
 E:\ModelEdit_val\
 ├── src/
-│   ├── data_handler.py      # PathMNIST loading & strict train/held-out split
+│   ├── data_handler.py      # 4-Set Protocol: FT-Train/Edit-Discovery/FT-Val/Test
 │   ├── trainer.py           # ViT fine-tuning with auto GPU/CPU + checkpointing
 │   ├── locator.py           # ASTRA-style causal tracing for layer importance
-│   ├── editor.py            # AlphaEdit + HeadEditor implementations
-│   ├── evaluator.py         # Evaluation with confusion matrix & reports
-│   └── main.py              # CLI entry point
+│   ├── editor.py            # AlphaEdit + HeadEditor (dual dataloader support)
+│   ├── evaluator.py         # Comparative evaluation on Official Test Set
+│   └── main.py              # CLI entry point (4-Set Protocol)
 ├── checkpoints/
 │   ├── vit_pathmnist_finetuned.pt      # Fine-tuned model
 │   ├── vit_pathmnist_edited.pt         # AlphaEdit edited model
@@ -28,7 +28,8 @@ E:\ModelEdit_val\
 │   └── projection_cache.pt             # Cached null-space projections
 ├── logs/
 │   └── {timestamp}/                 # Timestamped run logs
-│       ├── data_split_info.csv      # Dataset split statistics
+│       ├── split_indices.pt         # Saved split indices (reproducibility)
+│       ├── data_split_info.csv      # 4-Set Protocol statistics
 │       ├── training_metrics.csv     # Training loss/accuracy per epoch
 │       ├── layer_importance.csv     # Per-sample causal tracing scores
 │       ├── layer_statistics.csv     # Aggregated layer statistics
@@ -36,10 +37,10 @@ E:\ModelEdit_val\
 │       └── head_edit_log.csv        # Head Editing records
 ├── results/
 │   └── {timestamp}/                 # Timestamped run results
-│       ├── confusion_matrix.csv     # Confusion matrix
-│       ├── evaluation_report.csv    # Detailed metrics
-│       ├── predictions.csv          # All predictions with probabilities
-│       └── confusion_matrix.png     # Visualization
+│       ├── comparative_evaluation.csv  # Pre vs Post comparison
+│       ├── confusion_matrix_orig.csv   # Pre-edit confusion matrix
+│       ├── confusion_matrix_edit.csv   # Post-edit confusion matrix
+│       └── confusion_matrix.png        # Visualization
 ├── reference/                        # Reference implementations
 │   ├── AlphaEdit/                   # Null-space projection method
 │   └── ASTRA/                       # Activation steering method
@@ -101,43 +102,47 @@ uv run python src/main.py --stage eval
 
 ### Stage 1: Data Preparation (`--stage data`)
 
-- Loads PathMNIST (224x224, 9 classes) from local `.npz` file
-- Creates **strict train/held-out split** (default 80:20)
-- **CRITICAL**: Held-out set is isolated from ALL training and editing
+Implements the **4-Set Protocol** for rigorous data isolation:
+
+| Operational Set | Source | Ratio | Purpose |
+|-----------------|--------|-------|---------|
+| **FT-Train** | Official Train | 90% | Fine-tuning + AlphaEdit covariance (K^T K) |
+| **Edit-Discovery** | Official Train | 10% | Find "unseen errors" for editing targets |
+| **FT-Val** | Official Val | 100% | Early stopping during fine-tuning only |
+| **Test Set** | Official Test | 100% | Final Comparative Evaluation |
+
+- **CRITICAL**: Edit-Discovery samples are NEVER seen during fine-tuning
+- Split indices saved to `logs/split_indices.pt` for reproducibility
 - Exports: `logs/data_split_info.csv`
 
 ### Stage 2: Fine-tuning (`--stage train`)
 
 - Uses `google/vit-base-patch16-224` with 9-class head
+- Trains on **FT-Train set only** (90% of official train)
+- Uses **FT-Val** for early stopping
 - **Auto-detects GPU/CPU** for optimal performance
 - **Skips training if checkpoint exists** (loads from checkpoint)
-- Saves checkpoints with model weights, optimizer state, and training history
 - Exports: `checkpoints/vit_pathmnist_finetuned.pt`, `logs/training_metrics.csv`
 
 ### Stage 3: Layer Localization (`--stage locate`)
 
-Implements **ASTRA-style Causal Tracing** for ViT:
+Implements **ASTRA-style Causal Tracing** on **Edit-Discovery set**:
 
 **Core Algorithm:**
-1. **Corrupt Input**: Add Gaussian noise to patch embeddings (positions 1-196)
-2. **Run Corrupted Forward**: Observe prediction probability drop
-3. **Restore & Measure**: For each layer, restore clean activations and measure probability recovery
-4. **Importance Score**: Higher recovery = more important layer for the error
-
-**Output Example:**
-```
-Layer  4: ████████████████████ 0.0496  <- Most important
-Layer  3: ███████████████████  0.0480
-Layer  5: ██████████████████   0.0451
-...
-Layer  1: ██                   0.0037  <- Least important
-```
+1. **Find Errors**: Identify misclassified samples from Edit-Discovery set (unseen during training)
+2. **Corrupt Input**: Add Gaussian noise to patch embeddings (positions 1-196)
+3. **Run Corrupted Forward**: Observe prediction probability drop
+4. **Restore & Measure**: For each layer, restore clean activations and measure probability recovery
+5. **Importance Score**: Higher recovery = more important layer for the error
 
 Exports: `logs/layer_importance.csv`, `logs/layer_statistics.csv`
 
 ### Stage 4: Weight Editing (`--stage edit`)
 
-Two editing methods are available:
+Two editing methods available, both using the **4-Set Protocol**:
+
+- **stats_loader**: FT-Train (for covariance/Fisher computation)
+- **target_loader**: Edit-Discovery (for finding samples to fix)
 
 #### AlphaEdit (default: `--edit-method alphaedit`)
 
@@ -168,11 +173,16 @@ Exports: `logs/edit_log.csv` or `logs/head_edit_log.csv`, `checkpoints/vit_pathm
 
 ### Stage 5: Evaluation (`--stage eval`)
 
-- Runs inference on **HELD-OUT set only** (ensures valid evaluation)
-- Compares before/after editing performance
-- Computes per-class precision, recall, F1
-- Generates confusion matrix and visualization
-- Exports: `results/confusion_matrix.csv`, `results/evaluation_report.csv`
+Runs **Comparative Evaluation** on **Official Test Set** (4-Set Protocol):
+
+- Compares Pre-Edit vs Post-Edit model performance
+- **Metrics**:
+  - **Accuracy Delta**: Change in accuracy (positive = improvement)
+  - **Stability**: Fraction of correct samples that remained correct
+  - **Fix Rate**: Fraction of error samples that became correct
+  - **Regression Rate**: Fraction of correct samples that became wrong
+- Generates confusion matrices for both models
+- Exports: `results/comparative_evaluation.csv`, `results/confusion_matrix_*.csv`
 
 ## Command Line Arguments
 
@@ -185,7 +195,7 @@ Exports: `logs/edit_log.csv` or `logs/head_edit_log.csv`, `checkpoints/vit_pathm
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--data-path` | `~/.medmnist/pathmnist_224.npz` | PathMNIST data file |
-| `--held-out-ratio` | 0.2 | Fraction for held-out validation |
+| `--ft-train-ratio` | 0.9 | Fraction of official train for FT-Train (remaining goes to Edit-Discovery) |
 | `--seed` | 42 | Random seed for reproducibility |
 
 ### Training Options
@@ -271,69 +281,67 @@ uv run python src/main.py --stage full --timestamp --edit-method head
 
 ## Technical Details
 
-### Data Isolation Rules
+### Data Isolation Rules (4-Set Protocol)
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Original Data                        │
-├───────────────────────────┬─────────────────────────────┤
-│     Training Set (80%)    │   Held-Out Set (20%)        │
-├───────────────────────────┼─────────────────────────────┤
-│ ✓ Fine-tuning            │ ✗ NEVER used for training   │
-│ ✓ Misclassified analysis │ ✗ NEVER used for editing    │
-│ ✓ Layer localization     │ ✓ ONLY for final evaluation │
-│ ✓ Weight editing         │                             │
-└───────────────────────────┴─────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Official MedMNIST Data                              │
+├────────────────────┬───────────────┬─────────────────┬──────────────────────┤
+│  FT-Train (90%)    │ Edit-Discovery│  FT-Val         │  Test Set            │
+│  ~81,000 samples   │ (10%) ~9,000  │  (Official Val) │  (Official Test)     │
+├────────────────────┼───────────────┼─────────────────┼──────────────────────┤
+│ ✓ Fine-tuning      │ ✗ NEVER train │ ✓ Early stop    │ ✗ NEVER train        │
+│ ✓ AlphaEdit stats  │ ✓ Find errors │ ✗ NEVER edit    │ ✗ NEVER edit         │
+│ ✓ Fisher info      │ ✓ Edit targets│ (discard after) │ ✓ FINAL evaluation   │
+└────────────────────┴───────────────┴─────────────────┴──────────────────────┘
 ```
 
-### Complete Pipeline Flow
+### Complete Pipeline Flow (4-Set Protocol)
 
 ```
-PathMNIST Dataset (89,996 images)
+Official MedMNIST Data
          │
          ▼
 ┌─────────────────────────────────────────────┐
-│  Stage 1: Data Split                        │
-│  Training: 71,997 (80%)                     │
-│  Held-out: 17,999 (20%) [ISOLATED]          │
+│  Stage 1: Data Split (4-Set Protocol)       │
+│  FT-Train: 90% of Official Train            │
+│  Edit-Discovery: 10% of Official Train      │
+│  FT-Val: Official Val (early stopping)      │
+│  Test Set: Official Test (final eval)       │
 └─────────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────────┐
-│  Stage 2: Fine-tuning                       │
+│  Stage 2: Fine-tuning (on FT-Train)         │
 │  ViT-B/16 → ~99% accuracy                   │
+│  Early stopping with FT-Val                 │
 │  [Skipped if checkpoint exists]             │
 └─────────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────────┐
 │  Stage 3: ASTRA Layer Localization          │
-│  Find ~50 misclassified samples             │
+│  Find errors from Edit-Discovery set        │
+│  (unseen during training!)                  │
 │  Causal trace → identify important layers   │
-│  Output: top N layers (e.g., [4, 3, 5])     │
 └─────────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────────┐
 │  Stage 4: Weight Editing                    │
+│  stats_loader: FT-Train (covariance/Fisher) │
+│  target_loader: Edit-Discovery (errors)     │
 │                                             │
-│  if --edit-method alphaedit:                │
-│    → Use ASTRA layers (or user-specified)   │
-│    → Null-space projection on MLP layers    │
-│    → Per-sample editing                     │
-│                                             │
-│  if --edit-method head:                     │
-│    → Modify classifier head only            │
-│    → EWC regularization                     │
-│    → Batch editing (faster)                 │
+│  AlphaEdit: Null-space on MLP layers        │
+│  Head Edit: Classifier head + EWC           │
 └─────────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────────┐
-│  Stage 5: Evaluation                        │
-│  Test on HELD-OUT set only                  │
-│  Compare before/after editing               │
-│  Generate confusion matrix & reports        │
+│  Stage 5: Comparative Evaluation            │
+│  Test on Official Test Set                  │
+│  Metrics: Accuracy Delta, Stability,        │
+│           Fix Rate, Regression Rate         │
 └─────────────────────────────────────────────┘
 ```
 
@@ -362,6 +370,18 @@ Where:
 The null-space projection P ensures edits don't affect predictions for correctly classified samples.
 
 ## Changelog
+
+### v1.4.0 (2026-01-16)
+- **4-Set Protocol**: Implemented strict data isolation strategy
+  - FT-Train (90% official train): Fine-tuning + AlphaEdit covariance statistics
+  - Edit-Discovery (10% official train): Find unseen errors for editing targets
+  - FT-Val (official val): Early stopping during fine-tuning only
+  - Test Set (official test): Final comparative evaluation
+- **Dual Dataloader Support**: Editor classes now accept `stats_loader` and `target_loader`
+- **Comparative Evaluation**: New `evaluate_comparative()` function with metrics:
+  - Accuracy Delta, Stability, Fix Rate, Regression Rate
+- **Split Reproducibility**: Split indices saved to `logs/split_indices.pt`
+- **New argument**: `--ft-train-ratio` (replaces `--held-out-ratio`)
 
 ### v1.3.0 (2026-01-14)
 - **Head Editing**: New alternative editing method that modifies only the classifier head
