@@ -97,6 +97,36 @@ uv run python src/main.py --stage edit
 uv run python src/main.py --stage eval
 ```
 
+## Baseline Training (New Data Protocol)
+
+Before running the full editing pipeline, establish a baseline using official MedMNIST splits:
+
+```bash
+# Run baseline training (10 epochs)
+uv run python src/train_baseline.py --epochs 10
+
+# With custom parameters
+uv run python src/train_baseline.py --epochs 20 --batch-size 64 --lr 5e-5
+
+# Specify custom data directory
+uv run python src/train_baseline.py --epochs 10 --data-dir  ~\.medmnist\
+```
+
+**Data Protocol:**
+| Split | Purpose |
+|-------|---------|
+| `train` | Fine-tuning AND finding edit candidates |
+| `val` | Model selection (best checkpoint) and locality checks |
+| `test` | Final report only |
+
+**Output Files:**
+- `checkpoints/vit_baseline_best.pt` - Best model checkpoint
+- `logs/baseline_metrics.csv` - Final accuracy on train/val/test
+- `logs/baseline_training_history.csv` - Per-epoch metrics
+- `logs/training_curve.png` - Loss and accuracy plots
+
+**Sanity Check:** The script warns if val/test accuracy exceeds 98%, which may indicate data leakage or an overly simple task.
+
 ## Pipeline Stages
 
 ### Stage 1: Data Preparation (`--stage data`)
@@ -362,6 +392,14 @@ Where:
 The null-space projection P ensures edits don't affect predictions for correctly classified samples.
 
 ## Changelog
+
+### v1.4.0 (2026-01-15)
+- **Baseline Training Script**: New `train_baseline.py` for establishing baseline with official MedMNIST splits
+  - Uses `medmnist` library directly (not manual npz loading)
+  - Follows new data protocol: train/val/test splits used as intended
+  - Sanity check for abnormally high val/test accuracy (>98%)
+  - Generates training curve plots
+- **New dependency**: `medmnist>=3.0.0`
 
 ### v1.3.0 (2026-01-14)
 - **Head Editing**: New alternative editing method that modifies only the classifier head
