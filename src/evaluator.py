@@ -734,16 +734,17 @@ def evaluate_comparative(
     print(f"\nResults exported to: {summary_path}")
 
     # Export confusion matrices
-    class_names = Evaluator.CLASS_NAMES
+    # Use confusion matrix shape to determine number of classes dynamically
+    n_classes = cm_orig.shape[0]
     df_cm_orig = pd.DataFrame(
         cm_orig,
-        index=[f"True_{i}" for i in range(len(class_names))],
-        columns=[f"Pred_{i}" for i in range(len(class_names))]
+        index=[f"True_{i}" for i in range(n_classes)],
+        columns=[f"Pred_{i}" for i in range(n_classes)]
     )
     df_cm_edit = pd.DataFrame(
         cm_edit,
-        index=[f"True_{i}" for i in range(len(class_names))],
-        columns=[f"Pred_{i}" for i in range(len(class_names))]
+        index=[f"True_{i}" for i in range(n_classes)],
+        columns=[f"Pred_{i}" for i in range(n_classes)]
     )
 
     df_cm_orig.to_csv(results_dir / 'confusion_matrix_orig.csv')
