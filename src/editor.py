@@ -178,37 +178,41 @@ class KCollector:
     ) -> torch.Tensor:
         """
         Compute K vectors for given images at specified layer.
-        
+
         Args:
             images: Input images of shape (B, C, H, W)
             layer: Target layer index
-            
+
         Returns:
-            K vectors of shape (hidden_size, B) - transposed for matrix ops
+            K vectors of shape (in_features, B) - transposed for matrix ops
+            where in_features is the input dimension of the target module
         """
         self.model.eval()
-        
+
         # Get the module name
         module_name = self.hparams.rewrite_module_tmp.format(layer)
-        
+
         # Trace the input to target module
         with TraceDict(self.model, [module_name], retain_input=True) as traces:
             with torch.no_grad():
                 images = images.to(self.device)
                 _ = self.model(images)
-                
-                # Get input activations: shape (B, 197, 768)
+
+                # Get input activations
+                # For vit.encoder.layer.{}.output.dense:
+                #   input shape: (B, 197, 3072) - from intermediate layer
+                #   output shape: (B, 197, 768) - back to hidden size
                 k_input = traces[module_name]['input']
-        
+
         # Extract based on token position
         if self.hparams.fact_token == "cls":
             # Use CLS token (position 0)
-            k = k_input[:, 0, :]  # (B, 768)
+            k = k_input[:, 0, :]  # (B, in_features)
         else:
             # Use mean of all tokens
-            k = k_input.mean(dim=1)  # (B, 768)
-        
-        # Transpose for matrix operations: (768, B)
+            k = k_input.mean(dim=1)  # (B, in_features)
+
+        # Transpose for matrix operations: (in_features, B)
         return k.T
     
     def compute_current_output(
@@ -382,15 +386,16 @@ class NullSpaceProjector:
         to near-zero eigenvalues of E[K @ K^T] (second moment / covariance).
 
         Args:
-            K0: Preserved knowledge matrix of shape (hidden_size, num_samples)
+            K0: Preserved knowledge matrix of shape (in_features, num_samples)
+                where in_features is the input dimension of the target module
 
         Returns:
-            Projection matrix P of shape (hidden_size, hidden_size)
+            Projection matrix P of shape (in_features, in_features)
         """
         # Compute covariance (second moment): E[K @ K^T] = (K0 @ K0^T) / num_samples
         # IMPORTANT: Must normalize by sample count to match AlphaEdit original implementation
         num_samples = K0.shape[1]
-        cov = (K0 @ K0.T) / num_samples  # (hidden_size, hidden_size)
+        cov = (K0 @ K0.T) / num_samples  # (in_features, in_features)
 
         # SVD decomposition
         U, S, Vh = torch.linalg.svd(cov)
@@ -636,48 +641,30 @@ class Editor:
             target_module = self._get_module(self.model, module_name)
 
             # The weight matrix shape is (out_features, in_features)
-            # delta is (hidden_size, hidden_size), we need to adjust
+            # delta is (in_features, in_features) after our fix
+            # For vit.encoder.layer.{}.output.dense:
+            #   weight shape: (768, 3072)
+            #   delta shape: (3072, 3072)
             with torch.no_grad():
-                # For nn.Linear: y = x @ W^T + b
-                # We want to add delta to the output, so we modify W
-                # New output = old_output + delta @ K = x @ W^T + x @ delta^T
-                # So W_new = W + delta^T (if delta acts on input)
-
-                # Actually, for the output.dense layer:
-                # Input: (B, 197, 3072) -> Output: (B, 197, 768)
-                # Weight: (768, 3072)
-
-                # We computed delta to modify the output at CLS position
-                # This is an approximation - we apply a rank-B update
-
                 old_weight = target_module.weight.data.clone()
 
-                # Simplified update: scale delta to match weight dimensions
-                if delta.shape != old_weight.shape:
-                    # Project delta to appropriate dimensions
-                    # delta: (768, 768), weight: (768, 3072)
-                    # We compute a low-rank update: delta @ K_normalized
-                    K_normalized = K / (K.norm(dim=0, keepdim=True) + 1e-8)
-
-                    # Expand to full weight dimensions
-                    # This is a simplification - for ViT output.dense, input is 3072
-                    in_features = old_weight.shape[1]
-                    out_features = old_weight.shape[0]
-
-                    # Create a projection from hidden to input dimension
-                    if in_features != delta.shape[1]:
-                        # Use random projection (simplified)
-                        proj = torch.randn(delta.shape[1], in_features, device=self.device)
-                        proj = proj / proj.norm(dim=1, keepdim=True)
-                        delta_proj = delta @ proj
-                    else:
-                        delta_proj = delta
-
-                    target_module.weight.data = old_weight + delta_proj
+                # Match delta shape to weight shape
+                # Following AlphaEdit's upd_matrix_match_shape logic
+                if delta.shape == old_weight.shape:
+                    # Direct match
+                    upd_matrix = delta
+                elif delta.T.shape == old_weight.shape:
+                    # Transposed match (for GPT-2/GPT-J style weights)
+                    upd_matrix = delta.T
                 else:
-                    target_module.weight.data = old_weight + delta
+                    raise ValueError(
+                        f"Update matrix shape {delta.shape} does not match "
+                        f"weight shape {old_weight.shape} or its transpose. "
+                        f"K shape: {K.shape}, module: {module_name}"
+                    )
 
-                update_norm = torch.norm(target_module.weight.data - old_weight).item()
+                target_module.weight.data = old_weight + upd_matrix
+                update_norm = torch.norm(upd_matrix).item()
 
             # Record (but don't update cache yet!)
             edit_info['layer_updates'][layer] = {
