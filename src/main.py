@@ -24,6 +24,19 @@ import os
 from pathlib import Path
 from datetime import datetime
 
+# ============================================================
+# HuggingFace Mirror Configuration (for users in China)
+# Set environment variables BEFORE importing transformers
+# ============================================================
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+# Local model cache directory (relative to project root)
+_PROJECT_ROOT = Path(__file__).parent.parent
+_MODEL_CACHE_DIR = _PROJECT_ROOT / 'models' / 'pretrained'
+_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+os.environ['HF_HOME'] = str(_MODEL_CACHE_DIR)
+os.environ['TRANSFORMERS_CACHE'] = str(_MODEL_CACHE_DIR)
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
