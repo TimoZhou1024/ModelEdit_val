@@ -675,7 +675,21 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
             model_edit=model_after,
             test_loader=dataloaders['test'],
             device=device,
-            results_dir=args.results_dir
+            results_dir=args.results_dir,
+            set_name="Test Set"
+        )
+
+        # Run comparative evaluation on Edit-Discovery Set
+        print("\n" + "=" * 70)
+        print(">>> EVALUATING ON EDIT-DISCOVERY SET <<<")
+        print(">>> This set was used to find misclassified samples for editing <<<\n")
+        evaluate_comparative(
+            model_orig=model_before,
+            model_edit=model_after,
+            test_loader=dataloaders['discovery'],
+            device=device,
+            results_dir=args.results_dir,
+            set_name="Edit-Discovery Set"
         )
 
         return None

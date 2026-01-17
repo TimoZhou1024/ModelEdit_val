@@ -573,20 +573,21 @@ def evaluate_comparative(
     model_edit: nn.Module,
     test_loader: torch.utils.data.DataLoader,
     device: torch.device = None,
-    results_dir: str = "results"
+    results_dir: str = "results",
+    set_name: str = "Test Set"
 ) -> Dict[str, Any]:
     """
-    Comparative Evaluation on Official Test Set (4-Set Protocol).
+    Comparative Evaluation on a given dataset (4-Set Protocol).
 
-    This is the FINAL evaluation that compares Pre-Edit vs Post-Edit models
-    on the Official Test Set, which was NEVER used for training or editing.
+    This compares Pre-Edit vs Post-Edit models on the specified dataset.
 
     Args:
         model_orig: Original model (before editing)
         model_edit: Edited model (after editing)
-        test_loader: DataLoader for Official Test Set
+        test_loader: DataLoader for the evaluation set
         device: Computation device
         results_dir: Directory for saving results
+        set_name: Name of the evaluation set (e.g., "Test Set", "Edit-Discovery Set")
 
     Returns:
         Dictionary with comparative metrics:
@@ -602,9 +603,12 @@ def evaluate_comparative(
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
+    # Create file-safe name for the set
+    set_name_safe = set_name.lower().replace(" ", "_").replace("-", "_")
+
     print("\n" + "=" * 70)
-    print("COMPARATIVE EVALUATION ON OFFICIAL TEST SET")
-    print("(4-Set Protocol: Final Pre-Edit vs Post-Edit Comparison)")
+    print(f"COMPARATIVE EVALUATION ON {set_name.upper()}")
+    print("(4-Set Protocol: Pre-Edit vs Post-Edit Comparison)")
     print("=" * 70)
 
     # Collect predictions from both models
@@ -618,7 +622,7 @@ def evaluate_comparative(
     probs_edit = []
 
     with torch.no_grad():
-        for images, labels in tqdm(test_loader, desc="Evaluating on Test Set"):
+        for images, labels in tqdm(test_loader, desc=f"Evaluating on {set_name}"):
             images = images.to(device)
 
             # Original model predictions
@@ -697,8 +701,8 @@ def evaluate_comparative(
     }
 
     # Print summary
-    print(f"\n=== Comparative Evaluation Results ===")
-    print(f"Test Set Size: {n_total} samples")
+    print(f"\n=== Comparative Evaluation Results ({set_name}) ===")
+    print(f"{set_name} Size: {n_total} samples")
     print(f"\nAccuracy:")
     print(f"  Pre-Edit:  {acc_orig*100:.2f}% ({n_correct_orig}/{n_total})")
     print(f"  Post-Edit: {acc_edit*100:.2f}% ({n_correct_edit}/{n_total})")
@@ -723,13 +727,13 @@ def evaluate_comparative(
         {'metric': 'stability', 'value': stability, 'notes': f'{n_stable}/{n_correct_orig}'},
         {'metric': 'fix_rate', 'value': fix_rate, 'notes': f'{n_fixed}/{n_error_orig}'},
         {'metric': 'regression_rate', 'value': regression_rate, 'notes': f'{n_regressed}/{n_correct_orig}'},
-        {'metric': 'n_total', 'value': n_total, 'notes': 'test set size'},
+        {'metric': 'n_total', 'value': n_total, 'notes': f'{set_name} size'},
         {'metric': 'n_fixed', 'value': n_fixed, 'notes': 'errors corrected'},
         {'metric': 'n_regressed', 'value': n_regressed, 'notes': 'new errors introduced'},
     ]
 
     df_summary = pd.DataFrame(summary_rows)
-    summary_path = results_dir / 'comparative_evaluation.csv'
+    summary_path = results_dir / f'comparative_evaluation_{set_name_safe}.csv'
     df_summary.to_csv(summary_path, index=False)
     print(f"\nResults exported to: {summary_path}")
 
@@ -747,8 +751,8 @@ def evaluate_comparative(
         columns=[f"Pred_{i}" for i in range(n_classes)]
     )
 
-    df_cm_orig.to_csv(results_dir / 'confusion_matrix_orig.csv')
-    df_cm_edit.to_csv(results_dir / 'confusion_matrix_edit.csv')
+    df_cm_orig.to_csv(results_dir / f'confusion_matrix_orig_{set_name_safe}.csv')
+    df_cm_edit.to_csv(results_dir / f'confusion_matrix_edit_{set_name_safe}.csv')
 
     print("=" * 70)
 
