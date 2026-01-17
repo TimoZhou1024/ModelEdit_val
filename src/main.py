@@ -48,7 +48,11 @@ from data_handler import DataHandler, MedMNISTDataset, MEDMNIST_INFO
 from trainer import Trainer
 from locator import Locator
 from editor import Editor, AlphaEditHyperParams, HeadEditor, HeadEditHyperParams
-from evaluator import Evaluator, evaluate_before_after, evaluate_comparative
+from evaluator import (
+    Evaluator, evaluate_before_after, evaluate_comparative,
+    evaluate_edit_samples, compare_edit_samples_before_after, print_edit_samples_comparison,
+    evaluate_projection_samples, compare_projection_samples_before_after, print_projection_samples_comparison
+)
 
 
 def parse_args():
@@ -480,6 +484,41 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         print("No misclassified samples to edit!")
         return trainer
 
+    # ================================================================
+    # Collect edit samples for before/after evaluation
+    # ================================================================
+    discovery_dataset = data_handler.get_discovery_dataset(transform)
+    edit_indices = misclassified['indices'][:args.max_edits]
+
+    # Collect all edit samples
+    images_list = []
+    labels_list = []
+    for idx in edit_indices:
+        image, label = discovery_dataset[idx]
+        images_list.append(image)
+        labels_list.append(label)
+
+    edit_images = torch.stack(images_list)
+    edit_labels = torch.tensor(labels_list)
+    edit_indices_list = [int(i) for i in edit_indices]
+
+    # ================================================================
+    # Evaluate BEFORE editing
+    # ================================================================
+    print("\n" + "=" * 70)
+    print("EVALUATING EDIT SAMPLES BEFORE EDITING")
+    print("=" * 70)
+    results_before = evaluate_edit_samples(
+        model=trainer.model,
+        images=edit_images,
+        true_labels=edit_labels,
+        sample_indices=edit_indices_list,
+        device=device,
+        desc="Before Edit"
+    )
+    print(f"  Edit samples accuracy BEFORE: {results_before['accuracy']*100:.1f}% "
+          f"({results_before['num_correct']}/{results_before['num_total']})")
+
     # Select editing method
     if args.edit_method == "head":
         # Head Editing: modify only classifier
@@ -514,25 +553,11 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
             )
 
         # Apply batch edit (head editing processes all samples together)
-        # IMPORTANT: Use Edit-Discovery set for finding targets!
-        discovery_dataset = data_handler.get_discovery_dataset(transform)
-        edit_indices = misclassified['indices'][:args.max_edits]
-
-        images_list = []
-        labels_list = []
-        for idx in edit_indices:
-            image, label = discovery_dataset[idx]
-            images_list.append(image)
-            labels_list.append(label)
-
-        images = torch.stack(images_list)
-        labels = torch.tensor(labels_list)
-
         print(f"\nApplying head edit to {len(edit_indices)} samples...")
         editor.apply_edit(
-            images=images,
-            true_labels=labels,
-            sample_indices=[int(i) for i in edit_indices]
+            images=edit_images,
+            true_labels=edit_labels,
+            sample_indices=edit_indices_list
         )
 
         # Save
@@ -575,14 +600,30 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         print("\nPrecomputing null-space projections (using FT-Train for stats)...")
         editor.precompute_projection(
             stats_loader=dataloaders['ft_train'],
-            num_samples=500
+            num_samples=500,
+            track_samples=True  # Track samples for before/after evaluation
         )
 
-        # Apply edits one by one
-        # IMPORTANT: Use Edit-Discovery set for finding targets!
-        discovery_dataset = data_handler.get_discovery_dataset(transform)
-        edit_indices = misclassified['indices'][:args.max_edits]
+        # ================================================================
+        # Evaluate projection samples BEFORE editing
+        # ================================================================
+        projection_samples = editor.get_projection_samples()
+        if projection_samples is not None:
+            print("\n" + "=" * 70)
+            print("EVALUATING PROJECTION SAMPLES (FT-Train) BEFORE EDITING")
+            print("=" * 70)
+            proj_results_before = evaluate_projection_samples(
+                model=trainer.model,
+                projection_samples=projection_samples,
+                device=device,
+                desc="Projection Samples Before"
+            )
+            print(f"  Projection samples accuracy BEFORE: {proj_results_before['accuracy']*100:.2f}% "
+                  f"({proj_results_before['num_correct']}/{proj_results_before['num_total']})")
+        else:
+            proj_results_before = None
 
+        # Apply edits one by one
         for idx in tqdm(edit_indices, desc="Applying edits"):
             image, label = discovery_dataset[idx]
             image = image.unsqueeze(0)
@@ -601,6 +642,56 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         print(f"\n✓ AlphaEdit complete!")
         print(f"  Edited samples: {len(edit_indices)}")
         print(f"  Edited layers: {edit_layers}")
+
+        # ================================================================
+        # Evaluate projection samples AFTER editing
+        # ================================================================
+        if projection_samples is not None:
+            print("\n" + "=" * 70)
+            print("EVALUATING PROJECTION SAMPLES (FT-Train) AFTER EDITING")
+            print("=" * 70)
+            proj_results_after = evaluate_projection_samples(
+                model=trainer.model,
+                projection_samples=projection_samples,
+                device=device,
+                desc="Projection Samples After"
+            )
+            print(f"  Projection samples accuracy AFTER: {proj_results_after['accuracy']*100:.2f}% "
+                  f"({proj_results_after['num_correct']}/{proj_results_after['num_total']})")
+
+            # Compare and print detailed results
+            proj_comparison = compare_projection_samples_before_after(
+                results_before=proj_results_before,
+                results_after=proj_results_after
+            )
+            print_projection_samples_comparison(proj_comparison, proj_results_before, proj_results_after)
+
+    # ================================================================
+    # Evaluate AFTER editing
+    # ================================================================
+    print("\n" + "=" * 70)
+    print("EVALUATING EDIT SAMPLES AFTER EDITING")
+    print("=" * 70)
+    results_after = evaluate_edit_samples(
+        model=trainer.model,
+        images=edit_images,
+        true_labels=edit_labels,
+        sample_indices=edit_indices_list,
+        device=device,
+        desc="After Edit"
+    )
+    print(f"  Edit samples accuracy AFTER: {results_after['accuracy']*100:.1f}% "
+          f"({results_after['num_correct']}/{results_after['num_total']})")
+
+    # ================================================================
+    # Compare before/after and print detailed results
+    # ================================================================
+    comparison = compare_edit_samples_before_after(
+        results_before=results_before,
+        results_after=results_after,
+        sample_indices=edit_indices_list
+    )
+    print_edit_samples_comparison(comparison, results_before, results_after)
 
     return editor
 

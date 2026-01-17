@@ -759,6 +759,450 @@ def evaluate_comparative(
     return result
 
 
+def evaluate_edit_samples(
+    model: nn.Module,
+    images: torch.Tensor,
+    true_labels: torch.Tensor,
+    sample_indices: List[int],
+    device: torch.device = None,
+    desc: str = "Edit Samples"
+) -> Dict[str, Any]:
+    """
+    Evaluate model performance on specific edit samples.
+
+    Args:
+        model: Model to evaluate
+        images: Edit sample images (B, C, H, W)
+        true_labels: True labels for edit samples (B,)
+        sample_indices: Original dataset indices of these samples
+        device: Computation device
+        desc: Description for logging
+
+    Returns:
+        Dictionary with:
+        - predictions: Model predictions for each sample
+        - probabilities: Prediction probabilities
+        - correct: Boolean array of correct predictions
+        - accuracy: Overall accuracy on edit samples
+        - per_sample_info: Detailed info for each sample
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model.eval()
+    model.to(device)
+
+    images = images.to(device)
+    true_labels = true_labels.to(device)
+
+    with torch.no_grad():
+        outputs = model(images)
+        logits = outputs.logits
+        probs = torch.softmax(logits, dim=-1)
+        predictions = logits.argmax(dim=1)
+
+    predictions = predictions.cpu().numpy()
+    true_labels_np = true_labels.cpu().numpy()
+    probs_np = probs.cpu().numpy()
+
+    correct = predictions == true_labels_np
+    accuracy = correct.mean()
+
+    # Per-sample detailed info
+    per_sample_info = []
+    for i in range(len(predictions)):
+        per_sample_info.append({
+            'dataset_idx': sample_indices[i],
+            'true_label': int(true_labels_np[i]),
+            'predicted_label': int(predictions[i]),
+            'correct': bool(correct[i]),
+            'confidence': float(probs_np[i].max()),
+            'true_class_prob': float(probs_np[i, true_labels_np[i]])
+        })
+
+    return {
+        'predictions': predictions,
+        'true_labels': true_labels_np,
+        'probabilities': probs_np,
+        'correct': correct,
+        'accuracy': accuracy,
+        'num_correct': int(correct.sum()),
+        'num_total': len(predictions),
+        'per_sample_info': per_sample_info
+    }
+
+
+def compare_edit_samples_before_after(
+    results_before: Dict[str, Any],
+    results_after: Dict[str, Any],
+    sample_indices: List[int]
+) -> Dict[str, Any]:
+    """
+    Compare model performance on edit samples before and after editing.
+
+    Args:
+        results_before: Results from evaluate_edit_samples before editing
+        results_after: Results from evaluate_edit_samples after editing
+        sample_indices: Original dataset indices
+
+    Returns:
+        Dictionary with comparison metrics and per-sample changes
+    """
+    preds_before = results_before['predictions']
+    preds_after = results_after['predictions']
+    true_labels = results_before['true_labels']
+
+    correct_before = results_before['correct']
+    correct_after = results_after['correct']
+
+    # Transition analysis
+    fixed = (~correct_before) & correct_after  # Was wrong, now correct
+    broken = correct_before & (~correct_after)  # Was correct, now wrong
+    stayed_correct = correct_before & correct_after
+    stayed_wrong = (~correct_before) & (~correct_after)
+
+    # Per-sample transition info
+    per_sample_transitions = []
+    for i in range(len(preds_before)):
+        if fixed[i]:
+            status = "FIXED"
+        elif broken[i]:
+            status = "BROKEN"
+        elif stayed_correct[i]:
+            status = "STAYED_CORRECT"
+        else:
+            status = "STAYED_WRONG"
+
+        per_sample_transitions.append({
+            'dataset_idx': sample_indices[i],
+            'true_label': int(true_labels[i]),
+            'pred_before': int(preds_before[i]),
+            'pred_after': int(preds_after[i]),
+            'correct_before': bool(correct_before[i]),
+            'correct_after': bool(correct_after[i]),
+            'status': status
+        })
+
+    comparison = {
+        'accuracy_before': results_before['accuracy'],
+        'accuracy_after': results_after['accuracy'],
+        'accuracy_delta': results_after['accuracy'] - results_before['accuracy'],
+        'num_fixed': int(fixed.sum()),
+        'num_broken': int(broken.sum()),
+        'num_stayed_correct': int(stayed_correct.sum()),
+        'num_stayed_wrong': int(stayed_wrong.sum()),
+        'num_total': len(preds_before),
+        'fix_rate': float(fixed.sum()) / max(1, (~correct_before).sum()),
+        'break_rate': float(broken.sum()) / max(1, correct_before.sum()),
+        'per_sample_transitions': per_sample_transitions
+    }
+
+    return comparison
+
+
+def print_edit_samples_comparison(
+    comparison: Dict[str, Any],
+    results_before: Dict[str, Any],
+    results_after: Dict[str, Any]
+):
+    """
+    Print a formatted comparison of edit samples before and after editing.
+    """
+    print("\n" + "=" * 70)
+    print("EDIT SAMPLES PERFORMANCE COMPARISON")
+    print("=" * 70)
+
+    print(f"\nOverall Metrics:")
+    print(f"  Total Edit Samples: {comparison['num_total']}")
+    print(f"  Accuracy Before: {comparison['accuracy_before']*100:.1f}% "
+          f"({results_before['num_correct']}/{results_before['num_total']})")
+    print(f"  Accuracy After:  {comparison['accuracy_after']*100:.1f}% "
+          f"({results_after['num_correct']}/{results_after['num_total']})")
+    print(f"  Accuracy Change: {comparison['accuracy_delta']*100:+.1f}%")
+
+    print(f"\nTransition Analysis:")
+    print(f"  FIXED (wrong->correct):    {comparison['num_fixed']} samples")
+    print(f"  BROKEN (correct->wrong):   {comparison['num_broken']} samples")
+    print(f"  STAYED_CORRECT:            {comparison['num_stayed_correct']} samples")
+    print(f"  STAYED_WRONG:              {comparison['num_stayed_wrong']} samples")
+
+    # Show per-sample details (first 20)
+    print(f"\nPer-Sample Details (showing up to 20):")
+    print(f"{'Idx':>6} {'True':>6} {'Before':>8} {'After':>8} {'Status':>15}")
+    print("-" * 50)
+
+    for info in comparison['per_sample_transitions'][:20]:
+        status_color = {
+            'FIXED': '✓',
+            'BROKEN': '✗',
+            'STAYED_CORRECT': '=',
+            'STAYED_WRONG': '-'
+        }.get(info['status'], '?')
+
+        print(f"{info['dataset_idx']:>6} {info['true_label']:>6} "
+              f"{info['pred_before']:>8} {info['pred_after']:>8} "
+              f"{status_color} {info['status']:>13}")
+
+    if len(comparison['per_sample_transitions']) > 20:
+        print(f"  ... and {len(comparison['per_sample_transitions']) - 20} more samples")
+
+    # Summary judgment
+    print(f"\nEdit Success Judgment:")
+    if comparison['num_fixed'] > 0 and comparison['num_broken'] == 0:
+        print(f"  [EXCELLENT] Fixed {comparison['num_fixed']} errors with no regressions!")
+    elif comparison['num_fixed'] > comparison['num_broken']:
+        print(f"  [GOOD] Net improvement: +{comparison['num_fixed'] - comparison['num_broken']} correct predictions")
+    elif comparison['num_fixed'] == comparison['num_broken']:
+        print(f"  [NEUTRAL] Equal fixes and regressions")
+    else:
+        print(f"  [POOR] More regressions than fixes: {comparison['num_broken']} broken vs {comparison['num_fixed']} fixed")
+
+    print("=" * 70)
+
+
+def evaluate_projection_samples(
+    model: nn.Module,
+    projection_samples: Dict[str, Any],
+    device: torch.device = None,
+    desc: str = "Projection Samples"
+) -> Dict[str, Any]:
+    """
+    Evaluate model performance on the FT-Train samples used for projection matrix.
+
+    Args:
+        model: Model to evaluate
+        projection_samples: Dictionary from Editor.get_projection_samples()
+                           containing 'images', 'labels', 'num_samples'
+        device: Computation device
+        desc: Description for logging
+
+    Returns:
+        Dictionary with:
+        - predictions: Model predictions for each sample
+        - probabilities: Prediction probabilities
+        - correct: Boolean array of correct predictions
+        - accuracy: Overall accuracy on projection samples
+        - per_sample_info: Detailed info for each sample
+        - class_distribution: Count of samples per class
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if projection_samples is None:
+        print(f"Warning: No projection samples available")
+        return None
+
+    model.eval()
+    model.to(device)
+
+    images = projection_samples['images'].to(device)
+    labels = projection_samples['labels']
+    if isinstance(labels, torch.Tensor):
+        labels = labels.to(device)
+    else:
+        labels = torch.tensor(labels).to(device)
+
+    num_samples = projection_samples['num_samples']
+
+    # Process in batches to avoid memory issues
+    batch_size = 32
+    all_predictions = []
+    all_probs = []
+
+    with torch.no_grad():
+        for i in range(0, num_samples, batch_size):
+            batch_images = images[i:i+batch_size]
+            outputs = model(batch_images)
+            logits = outputs.logits
+            probs = torch.softmax(logits, dim=-1)
+            predictions = logits.argmax(dim=1)
+
+            all_predictions.append(predictions.cpu())
+            all_probs.append(probs.cpu())
+
+    predictions = torch.cat(all_predictions, dim=0).numpy()
+    probs_np = torch.cat(all_probs, dim=0).numpy()
+    true_labels_np = labels.cpu().numpy()
+
+    correct = predictions == true_labels_np
+    accuracy = correct.mean()
+
+    # Class distribution
+    unique_classes, class_counts = np.unique(true_labels_np, return_counts=True)
+    class_distribution = dict(zip(unique_classes.tolist(), class_counts.tolist()))
+
+    # Per-class accuracy
+    per_class_accuracy = {}
+    for cls in unique_classes:
+        mask = true_labels_np == cls
+        if mask.sum() > 0:
+            per_class_accuracy[int(cls)] = float(correct[mask].mean())
+
+    # Per-sample detailed info (for first 100 samples to save memory)
+    per_sample_info = []
+    for i in range(min(100, num_samples)):
+        per_sample_info.append({
+            'sample_idx': i,
+            'true_label': int(true_labels_np[i]),
+            'predicted_label': int(predictions[i]),
+            'correct': bool(correct[i]),
+            'confidence': float(probs_np[i].max()),
+            'true_class_prob': float(probs_np[i, true_labels_np[i]])
+        })
+
+    return {
+        'predictions': predictions,
+        'true_labels': true_labels_np,
+        'probabilities': probs_np,
+        'correct': correct,
+        'accuracy': accuracy,
+        'num_correct': int(correct.sum()),
+        'num_total': num_samples,
+        'class_distribution': class_distribution,
+        'per_class_accuracy': per_class_accuracy,
+        'per_sample_info': per_sample_info
+    }
+
+
+def compare_projection_samples_before_after(
+    results_before: Dict[str, Any],
+    results_after: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Compare model performance on projection samples before and after editing.
+
+    These are the FT-Train samples used to construct the AlphaEdit projection matrix P.
+    Changes in performance here indicate how well the edit preserves knowledge.
+
+    Args:
+        results_before: Results from evaluate_projection_samples before editing
+        results_after: Results from evaluate_projection_samples after editing
+
+    Returns:
+        Dictionary with comparison metrics
+    """
+    if results_before is None or results_after is None:
+        return None
+
+    preds_before = results_before['predictions']
+    preds_after = results_after['predictions']
+    true_labels = results_before['true_labels']
+
+    correct_before = results_before['correct']
+    correct_after = results_after['correct']
+
+    # Transition analysis
+    fixed = (~correct_before) & correct_after  # Was wrong, now correct
+    broken = correct_before & (~correct_after)  # Was correct, now wrong (REGRESSION!)
+    stayed_correct = correct_before & correct_after
+    stayed_wrong = (~correct_before) & (~correct_after)
+
+    # Per-class stability analysis
+    per_class_stability = {}
+    for cls in np.unique(true_labels):
+        mask = true_labels == cls
+        cls_correct_before = correct_before[mask]
+        cls_correct_after = correct_after[mask]
+        cls_stayed_correct = (cls_correct_before & cls_correct_after).sum()
+        cls_total_correct_before = cls_correct_before.sum()
+
+        per_class_stability[int(cls)] = {
+            'stability': float(cls_stayed_correct / max(1, cls_total_correct_before)),
+            'correct_before': int(cls_total_correct_before),
+            'correct_after': int(cls_correct_after.sum()),
+            'broken': int((cls_correct_before & ~cls_correct_after).sum())
+        }
+
+    comparison = {
+        'accuracy_before': results_before['accuracy'],
+        'accuracy_after': results_after['accuracy'],
+        'accuracy_delta': results_after['accuracy'] - results_before['accuracy'],
+        'num_fixed': int(fixed.sum()),
+        'num_broken': int(broken.sum()),  # This is REGRESSION - should be minimal!
+        'num_stayed_correct': int(stayed_correct.sum()),
+        'num_stayed_wrong': int(stayed_wrong.sum()),
+        'num_total': len(preds_before),
+        'stability': float(stayed_correct.sum()) / max(1, correct_before.sum()),
+        'regression_rate': float(broken.sum()) / max(1, correct_before.sum()),
+        'per_class_stability': per_class_stability
+    }
+
+    return comparison
+
+
+def print_projection_samples_comparison(
+    comparison: Dict[str, Any],
+    results_before: Dict[str, Any],
+    results_after: Dict[str, Any]
+):
+    """
+    Print a formatted comparison of projection samples (FT-Train) before and after editing.
+
+    This is critical for evaluating knowledge preservation - these samples were used
+    to construct the projection matrix P, so changes here indicate whether the
+    null-space projection is working correctly.
+    """
+    if comparison is None:
+        print("\n[WARNING] No projection samples comparison available")
+        return
+
+    print("\n" + "=" * 70)
+    print("PROJECTION SAMPLES (FT-Train) PERFORMANCE COMPARISON")
+    print("These samples were used to construct AlphaEdit's projection matrix P")
+    print("=" * 70)
+
+    print(f"\nOverall Metrics:")
+    print(f"  Total Projection Samples: {comparison['num_total']}")
+    print(f"  Accuracy Before: {comparison['accuracy_before']*100:.2f}% "
+          f"({results_before['num_correct']}/{results_before['num_total']})")
+    print(f"  Accuracy After:  {comparison['accuracy_after']*100:.2f}% "
+          f"({results_after['num_correct']}/{results_after['num_total']})")
+    print(f"  Accuracy Change: {comparison['accuracy_delta']*100:+.2f}%")
+
+    print(f"\nKnowledge Preservation Analysis:")
+    print(f"  Stability (correct->correct): {comparison['stability']*100:.1f}% "
+          f"({comparison['num_stayed_correct']}/{results_before['num_correct']})")
+    print(f"  Regression (correct->wrong):  {comparison['regression_rate']*100:.1f}% "
+          f"({comparison['num_broken']}/{results_before['num_correct']})")
+    print(f"  Fixed (wrong->correct):       {comparison['num_fixed']} samples")
+    print(f"  Stayed Wrong:                 {comparison['num_stayed_wrong']} samples")
+
+    # Per-class stability
+    print(f"\nPer-Class Stability (sorted by regression count):")
+    print(f"{'Class':>6} {'Before':>8} {'After':>8} {'Broken':>8} {'Stability':>10}")
+    print("-" * 45)
+
+    sorted_classes = sorted(
+        comparison['per_class_stability'].items(),
+        key=lambda x: x[1]['broken'],
+        reverse=True
+    )
+
+    for cls, stats in sorted_classes[:10]:  # Show top 10
+        print(f"{cls:>6} {stats['correct_before']:>8} {stats['correct_after']:>8} "
+              f"{stats['broken']:>8} {stats['stability']*100:>9.1f}%")
+
+    # Judgment
+    print(f"\nKnowledge Preservation Judgment:")
+    if comparison['stability'] >= 0.99 and comparison['num_broken'] == 0:
+        print(f"  [EXCELLENT] Perfect preservation - no regressions on projection samples!")
+    elif comparison['stability'] >= 0.95:
+        print(f"  [GOOD] High stability (>95%) - null-space projection working well")
+    elif comparison['stability'] >= 0.90:
+        print(f"  [WARNING] Moderate stability (90-95%) - some knowledge loss")
+    else:
+        print(f"  [POOR] Low stability (<90%) - significant knowledge loss, check projection matrix")
+
+    if comparison['num_broken'] > 0:
+        print(f"  [INFO] {comparison['num_broken']} previously correct samples now wrong (regression)")
+
+    if comparison['accuracy_delta'] < -0.01:
+        print(f"  [WARNING] Accuracy dropped by {abs(comparison['accuracy_delta'])*100:.2f}%")
+    elif comparison['accuracy_delta'] > 0.01:
+        print(f"  [INFO] Accuracy improved by {comparison['accuracy_delta']*100:.2f}% (unexpected but good)")
+
+    print("=" * 70)
+
 def main():
     """Test evaluator functionality."""
     print("=" * 70)

@@ -423,11 +423,12 @@ class NullSpaceProjector:
         layer: int,
         hparams: AlphaEditHyperParams,
         device: torch.device,
-        num_samples: int = 1000
-    ) -> torch.Tensor:
+        num_samples: int = 1000,
+        return_sample_info: bool = False
+    ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
         """
         Compute projection matrix from random data samples.
-        
+
         Args:
             model: The model
             dataloader: DataLoader with diverse samples
@@ -435,26 +436,55 @@ class NullSpaceProjector:
             hparams: Hyperparameters
             device: Computation device
             num_samples: Number of samples to collect
-            
+            return_sample_info: If True, also return info about samples used
+
         Returns:
-            Projection matrix P
+            Tuple of (Projection matrix P, sample_info dict or None)
+            sample_info contains: images, labels, batch_indices for evaluation
         """
         collector = KCollector(model, device, hparams)
-        
+
         K_list = []
         total = 0
-        
-        for images, _ in tqdm(dataloader, desc="Collecting K0"):
+
+        # Track sample information if requested
+        sample_images = [] if return_sample_info else None
+        sample_labels = [] if return_sample_info else None
+        batch_start_indices = [] if return_sample_info else None
+        current_idx = 0
+
+        for images, labels in tqdm(dataloader, desc="Collecting K0"):
             if total >= num_samples:
                 break
-            
+
             k = collector.compute_ks(images, layer)  # (hidden_size, B)
             K_list.append(k.cpu())
+
+            if return_sample_info:
+                # Store sample data for later evaluation
+                sample_images.append(images.cpu())
+                sample_labels.append(labels.cpu() if isinstance(labels, torch.Tensor) else torch.tensor(labels))
+                batch_start_indices.append(current_idx)
+                current_idx += images.shape[0]
+
             total += images.shape[0]
-        
+
         K0 = torch.cat(K_list, dim=1).to(device)  # (hidden_size, num_samples)
-        
-        return self.compute_projection_matrix(K0)
+        P = self.compute_projection_matrix(K0)
+
+        sample_info = None
+        if return_sample_info:
+            # Concatenate all collected samples
+            all_images = torch.cat(sample_images, dim=0)[:num_samples]
+            all_labels = torch.cat(sample_labels, dim=0)[:num_samples]
+            sample_info = {
+                'images': all_images,
+                'labels': all_labels,
+                'num_samples': min(total, num_samples),
+                'layer': layer
+            }
+
+        return P, sample_info
 
 
 class Editor:
@@ -492,11 +522,15 @@ class Editor:
 
         # Edit history
         self.edit_history = []
+
+        # Projection samples (FT-Train samples used for P matrix construction)
+        self.projection_samples = None  # Will store {images, labels, num_samples}
     
     def precompute_projection(
         self,
         stats_loader: torch.utils.data.DataLoader,
-        num_samples: int = 1000
+        num_samples: int = 1000,
+        track_samples: bool = True
     ):
         """
         Precompute null-space projection matrices for all target layers.
@@ -509,20 +543,31 @@ class Editor:
         Args:
             stats_loader: DataLoader for FT-Train set (for covariance computation)
             num_samples: Number of samples to collect for statistics
+            track_samples: If True, store the samples used for later evaluation
         """
         print("\nPrecomputing projection matrices (using FT-Train for stats)...")
-        
+
+        # Track samples from the first layer only (they're the same for all layers)
+        first_layer = True
+
         for layer in tqdm(self.hparams.layers, desc="Layers"):
-            P = self.projector.compute_from_random_samples(
+            P, sample_info = self.projector.compute_from_random_samples(
                 model=self.model,
                 dataloader=stats_loader,
                 layer=layer,
                 hparams=self.hparams,
                 device=self.device,
-                num_samples=num_samples
+                num_samples=num_samples,
+                return_sample_info=(track_samples and first_layer)
             )
             self.P[layer] = P
-            
+
+            # Store sample info from first layer
+            if track_samples and first_layer and sample_info is not None:
+                self.projection_samples = sample_info
+                print(f"\n  Tracked {sample_info['num_samples']} FT-Train samples for projection matrix")
+                first_layer = False
+
             # Initialize cache
             hidden_size = P.shape[0]
             self.cache_KKT[layer] = torch.zeros(
@@ -530,9 +575,18 @@ class Editor:
                 device=self.device,
                 dtype=P.dtype
             )
-        
+
         print(f"Projection matrices computed for layers: {self.hparams.layers}")
-    
+
+    def get_projection_samples(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the FT-Train samples used for projection matrix computation.
+
+        Returns:
+            Dictionary with 'images', 'labels', 'num_samples' or None if not tracked
+        """
+        return self.projection_samples
+
     def apply_edit(
         self,
         images: torch.Tensor,
