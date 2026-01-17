@@ -3,10 +3,17 @@ Editor Module for ViT Model Editing Pipeline (AlphaEdit Adaptation)
 ===================================================================
 Applies targeted weight edits to ViT models using null-space projection.
 
-Key AlphaEdit formulas adapted for ViT:
-- Projection matrix: P = Û @ Û^T (from SVD of preserved knowledge covariance)
-- Update: Δ = R @ K^T @ P @ (K @ K^T @ P + λI)^{-1}
-- Where R = V_target - W @ K (residual to desired output)
+Key AlphaEdit formulas adapted for ViT (matching original implementation):
+- Covariance matrix: C = E[K @ K^T] = (K0 @ K0^T) / num_samples
+- Projection matrix: P = Û @ Û^T (from SVD of C, using small singular values)
+- Update formula: Δ = [P @ (K @ K^T + cache_c) + λI]^{-1} @ P @ K @ R^T
+- Where R = Z_target - Z_current (residual to desired output)
+
+IMPORTANT implementation details (matching AlphaEdit paper):
+1. Covariance matrix MUST be normalized by sample count
+2. P is multiplied OUTSIDE (KKT + cache_c): P @ (KKT + cache_c)
+3. Solve form: Δ = A^{-1} @ B, not Δ = B @ A^{-1}
+4. Cache update happens AFTER all layers are edited in a round
 
 Target modules in ViT-B/16:
 - vit.encoder.layer.{i}.intermediate.dense (similar to MLP up_proj)
@@ -370,19 +377,21 @@ class NullSpaceProjector:
     ) -> torch.Tensor:
         """
         Compute null-space projection matrix.
-        
+
         P = Û @ Û^T where Û contains eigenvectors corresponding
-        to near-zero eigenvalues of K0 @ K0^T.
-        
+        to near-zero eigenvalues of E[K @ K^T] (second moment / covariance).
+
         Args:
             K0: Preserved knowledge matrix of shape (hidden_size, num_samples)
-            
+
         Returns:
             Projection matrix P of shape (hidden_size, hidden_size)
         """
-        # Compute covariance: K0 @ K0^T (hidden_size, hidden_size)
-        cov = K0 @ K0.T
-        
+        # Compute covariance (second moment): E[K @ K^T] = (K0 @ K0^T) / num_samples
+        # IMPORTANT: Must normalize by sample count to match AlphaEdit original implementation
+        num_samples = K0.shape[1]
+        cov = (K0 @ K0.T) / num_samples  # (hidden_size, hidden_size)
+
         # SVD decomposition
         U, S, Vh = torch.linalg.svd(cov)
         
@@ -557,59 +566,75 @@ class Editor:
             target_z = self.z_computer.compute_target_z(images, true_labels, layer)
             target_zs[layer] = target_z
         
+        # Store K vectors for cache update after all layers are edited
+        layer_K_vectors = {}
+
         for i, layer in enumerate(self.hparams.layers):
             print(f"\nEditing layer {layer} ({i+1}/{num_layers})...")
-            
+
             # Get K vectors: (hidden_size, B)
             K = self.k_collector.compute_ks(images, layer)
-            
+            layer_K_vectors[layer] = K  # Store for cache update later
+
             # Get current output: (B, hidden_size)
             current_z = self.k_collector.compute_current_output(images, layer)
-            
+
             # Target output
             target_z = target_zs[layer]
-            
+
             # Residual: R = V_target - W @ K
             # In our case: R = target_z - current_z
+            # R shape: (hidden_size, B) for matrix operations
             R = (target_z - current_z).T  # (hidden_size, B)
-            
+
             # Distribute residual across remaining layers
             R = R / (num_layers - i)
-            
+
             # Get projection matrix
             P = self.P.get(layer)
             if P is None:
                 # Use identity if not precomputed
                 P = torch.eye(K.shape[0], device=self.device, dtype=K.dtype)
-            
+
             # Get cached K @ K^T from previous edits
             cache_KKT = self.cache_KKT.get(layer, torch.zeros_like(P))
-            
-            # Compute update using AlphaEdit formula:
-            # Δ = R @ K^T @ P @ (K @ K^T @ P + cache_KKT @ P + λI)^{-1}
-            
+
+            # ================================================================
+            # AlphaEdit Update Formula (CORRECTED to match original paper):
+            #
+            # Δ = [P @ (K @ K^T + cache_c) + λI]^{-1} @ P @ K @ R^T
+            #
+            # Where:
+            #   - P: null-space projection matrix
+            #   - K: key vectors (hidden_size, B)
+            #   - R: residual vectors (hidden_size, B)
+            #   - cache_c: accumulated K @ K^T from previous edits
+            #   - λ: L2 regularization
+            # ================================================================
+
             KKT = K @ K.T  # (hidden_size, hidden_size)
-            
-            # A = K @ K^T @ P + cache_KKT @ P + λI
-            A = KKT @ P + cache_KKT @ P + self.hparams.L2 * torch.eye(
+
+            # A = P @ (K @ K^T + cache_c) + λI
+            # NOTE: P is multiplied OUTSIDE (KKT + cache_c), not inside!
+            A = P @ (KKT + cache_KKT) + self.hparams.L2 * torch.eye(
                 K.shape[0], device=self.device, dtype=K.dtype
             )
-            
-            # Solve: Δ @ A = R @ K^T @ P
-            # => Δ = R @ K^T @ P @ A^{-1}
-            RKT_P = R @ K.T @ P  # (hidden_size, hidden_size)
-            
+
+            # B = P @ K @ R^T
+            B = P @ K @ R.T  # (hidden_size, hidden_size)
+
+            # Solve: A @ Δ = B  =>  Δ = A^{-1} @ B
             try:
-                delta = torch.linalg.solve(A.T, RKT_P.T).T  # (hidden_size, hidden_size)
+                delta = torch.linalg.solve(A, B)  # (hidden_size, hidden_size)
             except Exception as e:
                 print(f"Warning: Solve failed, using pseudoinverse: {e}")
                 A_inv = torch.linalg.pinv(A)
-                delta = RKT_P @ A_inv
-            
+                delta = A_inv @ B
+
             # Apply update to model weights
             module_name = self.hparams.rewrite_module_tmp.format(layer)
             target_module = self._get_module(self.model, module_name)
-            
+
             # The weight matrix shape is (out_features, in_features)
             # delta is (hidden_size, hidden_size), we need to adjust
             with torch.no_grad():
@@ -617,28 +642,28 @@ class Editor:
                 # We want to add delta to the output, so we modify W
                 # New output = old_output + delta @ K = x @ W^T + x @ delta^T
                 # So W_new = W + delta^T (if delta acts on input)
-                
+
                 # Actually, for the output.dense layer:
                 # Input: (B, 197, 3072) -> Output: (B, 197, 768)
                 # Weight: (768, 3072)
-                
+
                 # We computed delta to modify the output at CLS position
                 # This is an approximation - we apply a rank-B update
-                
+
                 old_weight = target_module.weight.data.clone()
-                
+
                 # Simplified update: scale delta to match weight dimensions
                 if delta.shape != old_weight.shape:
                     # Project delta to appropriate dimensions
                     # delta: (768, 768), weight: (768, 3072)
                     # We compute a low-rank update: delta @ K_normalized
                     K_normalized = K / (K.norm(dim=0, keepdim=True) + 1e-8)
-                    
+
                     # Expand to full weight dimensions
                     # This is a simplification - for ViT output.dense, input is 3072
                     in_features = old_weight.shape[1]
                     out_features = old_weight.shape[0]
-                    
+
                     # Create a projection from hidden to input dimension
                     if in_features != delta.shape[1]:
                         # Use random projection (simplified)
@@ -647,24 +672,31 @@ class Editor:
                         delta_proj = delta @ proj
                     else:
                         delta_proj = delta
-                    
+
                     target_module.weight.data = old_weight + delta_proj
                 else:
                     target_module.weight.data = old_weight + delta
-                
+
                 update_norm = torch.norm(target_module.weight.data - old_weight).item()
-            
-            # Update cache
-            self.cache_KKT[layer] = cache_KKT + KKT
-            
-            # Record
+
+            # Record (but don't update cache yet!)
             edit_info['layer_updates'][layer] = {
                 'update_norm': update_norm,
                 'K_norm': K.norm().item(),
                 'R_norm': R.norm().item()
             }
-            
+
             print(f"  Update norm: {update_norm:.6f}")
+
+        # ================================================================
+        # Update cache AFTER all layers have been edited
+        # This matches the original AlphaEdit implementation
+        # ================================================================
+        for layer in self.hparams.layers:
+            K = layer_K_vectors[layer]
+            KKT = K @ K.T
+            cache_KKT = self.cache_KKT.get(layer, torch.zeros_like(KKT))
+            self.cache_KKT[layer] = cache_KKT + KKT
         
         # Record edit
         self.edit_history.append(edit_info)
