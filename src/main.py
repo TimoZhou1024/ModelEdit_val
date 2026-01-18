@@ -51,7 +51,8 @@ from editor import Editor, AlphaEditHyperParams, HeadEditor, HeadEditHyperParams
 from evaluator import (
     Evaluator, evaluate_before_after, evaluate_comparative,
     evaluate_edit_samples, compare_edit_samples_before_after, print_edit_samples_comparison,
-    evaluate_projection_samples, compare_projection_samples_before_after, print_projection_samples_comparison
+    evaluate_projection_samples, compare_projection_samples_before_after, print_projection_samples_comparison,
+    export_edit_samples_comparison, export_projection_samples_comparison
 )
 
 
@@ -666,6 +667,14 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
             )
             print_projection_samples_comparison(proj_comparison, proj_results_before, proj_results_after)
 
+            # Export projection samples comparison to CSV
+            export_projection_samples_comparison(
+                comparison=proj_comparison,
+                results_before=proj_results_before,
+                results_after=proj_results_after,
+                results_dir=args.results_dir
+            )
+
     # ================================================================
     # Evaluate AFTER editing
     # ================================================================
@@ -692,6 +701,14 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         sample_indices=edit_indices_list
     )
     print_edit_samples_comparison(comparison, results_before, results_after)
+
+    # Export edit samples comparison to CSV
+    export_edit_samples_comparison(
+        comparison=comparison,
+        results_before=results_before,
+        results_after=results_after,
+        results_dir=args.results_dir
+    )
 
     return editor
 

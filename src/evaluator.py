@@ -1203,6 +1203,139 @@ def print_projection_samples_comparison(
 
     print("=" * 70)
 
+
+def export_edit_samples_comparison(
+    comparison: Dict[str, Any],
+    results_before: Dict[str, Any],
+    results_after: Dict[str, Any],
+    results_dir: str = "results"
+) -> str:
+    """
+    Export edit samples comparison results to CSV files.
+
+    Args:
+        comparison: Comparison dict from compare_edit_samples_before_after
+        results_before: Results before editing
+        results_after: Results after editing
+        results_dir: Directory to save results
+
+    Returns:
+        Path to the summary CSV file
+    """
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Summary metrics CSV
+    summary_rows = [
+        {'metric': 'accuracy_before', 'value': comparison['accuracy_before'],
+         'notes': f"{comparison['accuracy_before']*100:.2f}%"},
+        {'metric': 'accuracy_after', 'value': comparison['accuracy_after'],
+         'notes': f"{comparison['accuracy_after']*100:.2f}%"},
+        {'metric': 'accuracy_delta', 'value': comparison['accuracy_delta'],
+         'notes': f"{comparison['accuracy_delta']*100:+.2f}%"},
+        {'metric': 'num_total', 'value': comparison['num_total'],
+         'notes': 'total edit samples'},
+        {'metric': 'num_fixed', 'value': comparison['num_fixed'],
+         'notes': 'wrong->correct'},
+        {'metric': 'num_broken', 'value': comparison['num_broken'],
+         'notes': 'correct->wrong (regression)'},
+        {'metric': 'num_stayed_correct', 'value': comparison['num_stayed_correct'],
+         'notes': 'correct->correct'},
+        {'metric': 'num_stayed_wrong', 'value': comparison['num_stayed_wrong'],
+         'notes': 'wrong->wrong'},
+        {'metric': 'fix_rate', 'value': comparison['fix_rate'],
+         'notes': f"{comparison['fix_rate']*100:.1f}%"},
+        {'metric': 'break_rate', 'value': comparison['break_rate'],
+         'notes': f"{comparison['break_rate']*100:.1f}%"},
+    ]
+
+    df_summary = pd.DataFrame(summary_rows)
+    summary_path = results_dir / 'comparative_evaluation_edit_samples.csv'
+    df_summary.to_csv(summary_path, index=False)
+    print(f"\nEdit samples comparison exported to: {summary_path}")
+
+    # Per-sample transitions CSV
+    if 'per_sample_transitions' in comparison:
+        df_transitions = pd.DataFrame(comparison['per_sample_transitions'])
+        transitions_path = results_dir / 'edit_samples_transitions.csv'
+        df_transitions.to_csv(transitions_path, index=False)
+        print(f"Edit samples transitions exported to: {transitions_path}")
+
+    return str(summary_path)
+
+
+def export_projection_samples_comparison(
+    comparison: Dict[str, Any],
+    results_before: Dict[str, Any],
+    results_after: Dict[str, Any],
+    results_dir: str = "results"
+) -> str:
+    """
+    Export projection samples (FT-Train) comparison results to CSV files.
+
+    Args:
+        comparison: Comparison dict from compare_projection_samples_before_after
+        results_before: Results before editing
+        results_after: Results after editing
+        results_dir: Directory to save results
+
+    Returns:
+        Path to the summary CSV file
+    """
+    if comparison is None:
+        print("[WARNING] No projection samples comparison to export")
+        return None
+
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Summary metrics CSV
+    summary_rows = [
+        {'metric': 'accuracy_before', 'value': comparison['accuracy_before'],
+         'notes': f"{comparison['accuracy_before']*100:.2f}%"},
+        {'metric': 'accuracy_after', 'value': comparison['accuracy_after'],
+         'notes': f"{comparison['accuracy_after']*100:.2f}%"},
+        {'metric': 'accuracy_delta', 'value': comparison['accuracy_delta'],
+         'notes': f"{comparison['accuracy_delta']*100:+.2f}%"},
+        {'metric': 'num_total', 'value': comparison['num_total'],
+         'notes': 'total projection samples (FT-Train)'},
+        {'metric': 'num_stayed_correct', 'value': comparison['num_stayed_correct'],
+         'notes': 'correct->correct (preserved)'},
+        {'metric': 'num_broken', 'value': comparison['num_broken'],
+         'notes': 'correct->wrong (regression)'},
+        {'metric': 'num_fixed', 'value': comparison['num_fixed'],
+         'notes': 'wrong->correct'},
+        {'metric': 'num_stayed_wrong', 'value': comparison['num_stayed_wrong'],
+         'notes': 'wrong->wrong'},
+        {'metric': 'stability', 'value': comparison['stability'],
+         'notes': f"{comparison['stability']*100:.1f}% (correct samples preserved)"},
+        {'metric': 'regression_rate', 'value': comparison['regression_rate'],
+         'notes': f"{comparison['regression_rate']*100:.1f}% (correct samples broken)"},
+    ]
+
+    df_summary = pd.DataFrame(summary_rows)
+    summary_path = results_dir / 'comparative_evaluation_projection_samples.csv'
+    df_summary.to_csv(summary_path, index=False)
+    print(f"\nProjection samples comparison exported to: {summary_path}")
+
+    # Per-class stability CSV
+    if 'per_class_stability' in comparison:
+        class_rows = []
+        for cls, stats in comparison['per_class_stability'].items():
+            class_rows.append({
+                'class': cls,
+                'correct_before': stats['correct_before'],
+                'correct_after': stats['correct_after'],
+                'broken': stats['broken'],
+                'stability': stats['stability']
+            })
+        df_class = pd.DataFrame(class_rows)
+        class_path = results_dir / 'projection_samples_per_class_stability.csv'
+        df_class.to_csv(class_path, index=False)
+        print(f"Per-class stability exported to: {class_path}")
+
+    return str(summary_path)
+
 def main():
     """Test evaluator functionality."""
     print("=" * 70)
