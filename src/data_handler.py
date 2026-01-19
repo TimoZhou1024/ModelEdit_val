@@ -325,11 +325,7 @@ class DataHandler:
         if not self.split_indices_path.exists():
             return False
 
-<<<<<<< Updated upstream
-        saved = torch.load(self.split_indices_path)
-=======
         saved = torch.load(self.split_indices_path, weights_only=False)
->>>>>>> Stashed changes
 
         # Verify config matches
         if (saved.get('dataset_name') != self.dataset_name or
