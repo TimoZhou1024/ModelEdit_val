@@ -587,7 +587,7 @@ def main():
         learning_rate=1e-4
     )
 
-    print("\n✓ Trainer test complete!")
+    print("\n[OK] Trainer test complete!")
     print(f"  Dataset: {dataset_name}")
     print(f"  Classes: {data_handler.n_classes}")
     print(f"  Best accuracy: {results['best_acc']:.2f}%")

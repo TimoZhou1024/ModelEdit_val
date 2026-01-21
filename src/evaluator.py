@@ -932,16 +932,16 @@ def print_edit_samples_comparison(
     print("-" * 50)
 
     for info in comparison['per_sample_transitions'][:20]:
-        status_color = {
-            'FIXED': '✓',
-            'BROKEN': '✗',
+        status_symbol = {
+            'FIXED': '+',
+            'BROKEN': 'X',
             'STAYED_CORRECT': '=',
             'STAYED_WRONG': '-'
         }.get(info['status'], '?')
 
         print(f"{info['dataset_idx']:>6} {info['true_label']:>6} "
               f"{info['pred_before']:>8} {info['pred_after']:>8} "
-              f"{status_color} {info['status']:>13}")
+              f"{status_symbol} {info['status']:>13}")
 
     if len(comparison['per_sample_transitions']) > 20:
         print(f"  ... and {len(comparison['per_sample_transitions']) - 20} more samples")
@@ -1378,7 +1378,7 @@ def main():
     evaluator.export_evaluation_report()
     evaluator.export_predictions()
     
-    print("\n✓ Evaluator test complete!")
+    print("\n[OK] Evaluator test complete!")
 
 
 if __name__ == "__main__":

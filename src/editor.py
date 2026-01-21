@@ -1272,7 +1272,7 @@ def main():
     editor.export_edit_log()
     editor.save_edited_model()
     
-    print("\n✓ Editor test complete!")
+    print("\n[OK] Editor test complete!")
 
 
 if __name__ == "__main__":
