@@ -1336,6 +1336,214 @@ def export_projection_samples_comparison(
 
     return str(summary_path)
 
+
+# ================================================================
+# Baseline Evaluation Functions
+# ================================================================
+
+def export_baseline_summary(
+    results: Dict[str, Any],
+    results_dir,
+    baseline_name: str
+) -> str:
+    """Export comprehensive baseline evaluation summary."""
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+
+    # Edit Samples
+    if 'edit_samples' in results and results['edit_samples']:
+        es = results['edit_samples']
+        rows.append({
+            'evaluation_level': 'edit_samples',
+            'metric': 'accuracy_delta',
+            'value': es.get('accuracy_delta', 0),
+            'before': es.get('accuracy_before', 0),
+            'after': es.get('accuracy_after', 0),
+            'notes': f"Fixed: {es.get('num_fixed', 0)}, Broken: {es.get('num_broken', 0)}"
+        })
+
+    # FT-Train Samples
+    if 'ft_train_samples' in results and results['ft_train_samples']:
+        ft = results['ft_train_samples']
+        rows.append({
+            'evaluation_level': 'ft_train_samples',
+            'metric': 'accuracy_delta',
+            'value': ft.get('accuracy_delta', 0),
+            'before': ft.get('accuracy_orig', 0),
+            'after': ft.get('accuracy_edit', 0),
+            'notes': f"Stability: {ft.get('stability', 0)*100:.1f}%"
+        })
+
+    # Test Set
+    if 'test_set' in results and results['test_set']:
+        ts = results['test_set']
+        rows.append({
+            'evaluation_level': 'test_set',
+            'metric': 'accuracy_delta',
+            'value': ts.get('accuracy_delta', 0),
+            'before': ts.get('accuracy_orig', 0),
+            'after': ts.get('accuracy_edit', 0),
+            'notes': f"Regression: {ts.get('regression_rate', 0)*100:.1f}%"
+        })
+
+    # Edit-Discovery Set
+    if 'edit_discovery' in results and results['edit_discovery']:
+        ed = results['edit_discovery']
+        rows.append({
+            'evaluation_level': 'edit_discovery_set',
+            'metric': 'accuracy_delta',
+            'value': ed.get('accuracy_delta', 0),
+            'before': ed.get('accuracy_orig', 0),
+            'after': ed.get('accuracy_edit', 0),
+            'notes': f"Fix rate: {ed.get('fix_rate', 0)*100:.1f}%"
+        })
+
+    df = pd.DataFrame(rows)
+    csv_path = results_dir / f'baseline_{baseline_name}_summary.csv'
+    df.to_csv(csv_path, index=False)
+
+    print(f"\nBaseline summary exported to: {csv_path}")
+    return str(csv_path)
+
+
+def evaluate_baseline_4level(
+    model_original: nn.Module,
+    model_baseline: nn.Module,
+    edit_images: torch.Tensor,
+    edit_labels: torch.Tensor,
+    edit_indices: List[int],
+    ft_train_loader: torch.utils.data.DataLoader,
+    test_loader: torch.utils.data.DataLoader,
+    discovery_loader: torch.utils.data.DataLoader,
+    device: torch.device = None,
+    results_dir: str = "results",
+    baseline_name: str = "baseline"
+) -> Dict[str, Any]:
+    """
+    Run 4-level evaluation comparing original vs baseline model.
+
+    The 4 levels are:
+    1. Edit Samples - misclassified samples being corrected
+    2. FT-Train Samples - knowledge preservation
+    3. Test Set - official held-out test
+    4. Edit-Discovery Set - set used to find errors
+
+    Args:
+        model_original: Original finetuned model (before baseline training)
+        model_baseline: Baseline model (after baseline training)
+        edit_images: Images of error samples (B, C, H, W)
+        edit_labels: True labels for error samples (B,)
+        edit_indices: Original dataset indices of error samples
+        ft_train_loader: DataLoader for FT-Train set
+        test_loader: DataLoader for Test set
+        discovery_loader: DataLoader for Edit-Discovery set
+        device: Computation device
+        results_dir: Directory for saving results
+        baseline_name: Name of the baseline (e.g., "retrain", "finetune_errors")
+
+    Returns:
+        Dictionary with results from all 4 evaluation levels
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n" + "=" * 70)
+    print(f"BASELINE 4-LEVEL EVALUATION: {baseline_name.upper()}")
+    print("=" * 70)
+
+    all_results = {}
+
+    # ================================================================
+    # Level 1: Edit Samples
+    # ================================================================
+    print("\n--- Level 1: Edit Samples ---")
+    edit_results_before = evaluate_edit_samples(
+        model_original, edit_images, edit_labels, edit_indices, device, "Before"
+    )
+    edit_results_after = evaluate_edit_samples(
+        model_baseline, edit_images, edit_labels, edit_indices, device, "After"
+    )
+    edit_comparison = compare_edit_samples_before_after(
+        edit_results_before, edit_results_after, edit_indices
+    )
+    print_edit_samples_comparison(edit_comparison, edit_results_before, edit_results_after)
+    export_edit_samples_comparison(
+        edit_comparison, edit_results_before, edit_results_after, results_dir
+    )
+    all_results['edit_samples'] = edit_comparison
+
+    # ================================================================
+    # Level 2: FT-Train Samples (Knowledge Preservation)
+    # ================================================================
+    print("\n--- Level 2: FT-Train Samples ---")
+    ft_train_results = evaluate_comparative(
+        model_original, model_baseline, ft_train_loader, device,
+        results_dir, set_name="FT-Train Samples"
+    )
+    all_results['ft_train_samples'] = ft_train_results
+
+    # ================================================================
+    # Level 3: Test Set
+    # ================================================================
+    print("\n--- Level 3: Test Set ---")
+    test_results = evaluate_comparative(
+        model_original, model_baseline, test_loader, device,
+        results_dir, set_name="Test Set"
+    )
+    all_results['test_set'] = test_results
+
+    # ================================================================
+    # Level 4: Edit-Discovery Set
+    # ================================================================
+    print("\n--- Level 4: Edit-Discovery Set ---")
+    discovery_results = evaluate_comparative(
+        model_original, model_baseline, discovery_loader, device,
+        results_dir, set_name="Edit-Discovery Set"
+    )
+    all_results['edit_discovery'] = discovery_results
+
+    # ================================================================
+    # Export Summary
+    # ================================================================
+    export_baseline_summary(all_results, results_dir, baseline_name)
+
+    # Print final summary
+    print("\n" + "=" * 70)
+    print(f"BASELINE {baseline_name.upper()} - FINAL SUMMARY")
+    print("=" * 70)
+    print(f"\n{'Level':<25} {'Acc Before':>12} {'Acc After':>12} {'Delta':>10}")
+    print("-" * 60)
+
+    if 'edit_samples' in all_results:
+        es = all_results['edit_samples']
+        print(f"{'Edit Samples':<25} {es['accuracy_before']*100:>11.2f}% "
+              f"{es['accuracy_after']*100:>11.2f}% {es['accuracy_delta']*100:>+9.2f}%")
+
+    if 'ft_train_samples' in all_results:
+        ft = all_results['ft_train_samples']
+        print(f"{'FT-Train Samples':<25} {ft['accuracy_orig']*100:>11.2f}% "
+              f"{ft['accuracy_edit']*100:>11.2f}% {ft['accuracy_delta']*100:>+9.2f}%")
+
+    if 'test_set' in all_results:
+        ts = all_results['test_set']
+        print(f"{'Test Set':<25} {ts['accuracy_orig']*100:>11.2f}% "
+              f"{ts['accuracy_edit']*100:>11.2f}% {ts['accuracy_delta']*100:>+9.2f}%")
+
+    if 'edit_discovery' in all_results:
+        ed = all_results['edit_discovery']
+        print(f"{'Edit-Discovery Set':<25} {ed['accuracy_orig']*100:>11.2f}% "
+              f"{ed['accuracy_edit']*100:>11.2f}% {ed['accuracy_delta']*100:>+9.2f}%")
+
+    print("=" * 70)
+
+    return all_results
+
+
 def main():
     """Test evaluator functionality."""
     print("=" * 70)

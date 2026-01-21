@@ -21,7 +21,8 @@ Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for c
 2. **Fine-tuning**: Train `vit-base-patch16-224` on FT-Train set
 3. **Locate Layers**: Use **ASTRA-style Causal Tracing** on Edit-Discovery set to identify significant layers
 4. **Edit Weights**: Apply **AlphaEdit** (MLP layers) or **Head Editing** (classifier only) to correct errors
-5. **Evaluate**: Run **Comparative Evaluation** on Official Test Set (Pre-Edit vs Post-Edit)
+5. **Baselines**: Compare with traditional approaches (Retrain, Finetune-on-Errors)
+6. **Evaluate**: Run **Comparative Evaluation** on Official Test Set (Pre-Edit vs Post-Edit)
 
 ## Project Structure
 
@@ -38,6 +39,8 @@ E:\ModelEdit_val\
 │   ├── vit_{dataset}_finetuned.pt     # Fine-tuned model (per dataset)
 │   ├── vit_{dataset}_edited.pt        # AlphaEdit edited model
 │   ├── vit_{dataset}_head_edited.pt   # Head edited model
+│   ├── vit_{dataset}_retrained.pt     # Baseline 1: Retrained model
+│   ├── vit_{dataset}_finetuned_on_errors.pt  # Baseline 2: Finetuned on errors
 │   └── projection_cache.pt            # Cached null-space projections
 ├── logs/
 │   └── {timestamp}/                 # Timestamped run logs
@@ -53,7 +56,9 @@ E:\ModelEdit_val\
 │       ├── comparative_evaluation.csv  # Pre vs Post comparison
 │       ├── confusion_matrix_orig.csv   # Pre-edit confusion matrix
 │       ├── confusion_matrix_edit.csv   # Post-edit confusion matrix
-│       └── confusion_matrix.png        # Visualization
+│       ├── confusion_matrix.png        # Visualization
+│       ├── baseline_retrain_summary.csv      # Baseline 1 results
+│       └── baseline_finetune_errors_summary.csv  # Baseline 2 results
 ├── reference/                        # Reference implementations
 │   ├── AlphaEdit/                   # Null-space projection method
 │   └── ASTRA/                       # Activation steering method
@@ -213,12 +218,52 @@ Runs **Comparative Evaluation** on **Official Test Set** (4-Set Protocol):
 - Generates confusion matrices for both models
 - Exports: `results/comparative_evaluation.csv`, `results/confusion_matrix_*.csv`
 
+### Baseline Methods
+
+Two baseline methods are provided for comparison with AlphaEdit:
+
+#### Baseline 1: Retrain from Scratch (`--stage baseline1`)
+
+Add error samples to FT-Train dataset, then train a NEW model from scratch.
+
+**Process:**
+1. Load finetuned model to identify misclassified samples
+2. Combine FT-Train + error samples into new training set
+3. Reinitialize model from pretrained weights
+4. Train from scratch on combined dataset
+5. Run 4-level evaluation comparing original vs retrained model
+
+**Use Case:** Tests whether simply including error samples in training data helps.
+
+#### Baseline 2: Finetune on Errors (`--stage baseline2`)
+
+Load the finetuned model and continue training ONLY on error samples.
+
+**Process:**
+1. Load finetuned model checkpoint
+2. Create dataset with only error samples
+3. Continue finetuning with lower learning rate
+4. Run 4-level evaluation comparing original vs finetuned model
+
+**Use Case:** Tests whether targeted finetuning on errors helps without full retraining.
+
+#### 4-Level Evaluation (Same as AlphaEdit)
+
+Both baselines use the same evaluation framework:
+
+| Level | Dataset | Purpose |
+|-------|---------|---------|
+| 1. Edit Samples | Error samples | Measure fix rate |
+| 2. FT-Train Samples | Training set | Knowledge preservation |
+| 3. Test Set | Official test | Generalization |
+| 4. Edit-Discovery Set | Discovery set | Overall improvement |
+
 ## Command Line Arguments
 
 ### Stage Selection
 | Argument | Description |
 |----------|-------------|
-| `--stage` | Pipeline stage: `data`, `train`, `locate`, `edit`, `eval`, `full` |
+| `--stage` | Pipeline stage: `data`, `train`, `locate`, `edit`, `eval`, `full`, `baseline1`, `baseline2` |
 
 ### Dataset Selection
 | Argument | Default | Description |
@@ -264,6 +309,12 @@ Runs **Comparative Evaluation** on **Official Test Set** (4-Set Protocol):
 | `--head-steps` | 50 | Number of optimization steps |
 | `--ewc-lambda` | 1000.0 | EWC regularization strength |
 | `--closed-form` | False | Use closed-form solution (faster, less precise) |
+
+### Baseline Options
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--baseline-epochs` | 10 | Number of epochs for baseline training |
+| `--baseline-lr` | 1e-5 | Learning rate for baseline finetuning (Baseline 2) |
 
 ### Output Options
 | Argument | Default | Description |
@@ -316,6 +367,18 @@ uv run python src/main.py --stage full --dataset organamnist --edit-method head 
 
 # Head Editing with closed-form solution (fastest)
 uv run python src/main.py --stage full --dataset organamnist --edit-method head --closed-form
+
+# === Baseline Comparisons ===
+# Baseline 1: Retrain from scratch with error samples added to training
+uv run python src/main.py --stage baseline1 --dataset pathmnist --baseline-epochs 10 --max-edits 30
+
+# Baseline 2: Finetune on error samples only
+uv run python src/main.py --stage baseline2 --dataset pathmnist --baseline-epochs 5 --baseline-lr 1e-5 --max-edits 30
+
+# Compare all methods on same dataset
+uv run python src/main.py --stage full --dataset pathmnist --run-name alphaedit_exp
+uv run python src/main.py --stage baseline1 --dataset pathmnist --run-name baseline1_exp
+uv run python src/main.py --stage baseline2 --dataset pathmnist --run-name baseline2_exp
 
 # === Compare Methods Across Datasets ===
 uv run python src/main.py --stage full --dataset dermamnist --edit-method alphaedit --run-name derma_alpha
@@ -413,6 +476,19 @@ Where:
 The null-space projection P ensures edits don't affect predictions for correctly classified samples.
 
 ## Changelog
+
+### v1.6.0 (2026-01-21)
+- **Baseline Methods**: Added two baseline methods for comparison with AlphaEdit
+  - **Baseline 1 (Retrain)**: Add error samples to FT-Train, train from scratch
+  - **Baseline 2 (Finetune-Errors)**: Finetune existing model on error samples only
+- **4-Level Evaluation**: Both baselines use same evaluation framework as AlphaEdit
+  - Edit Samples, FT-Train Samples, Test Set, Edit-Discovery Set
+- **New CLI stages**: `--stage baseline1`, `--stage baseline2`
+- **New arguments**: `--baseline-epochs`, `--baseline-lr`
+- **New functions**:
+  - `data_handler.py`: `get_combined_ft_train_with_errors()`, `get_error_samples_dataset()`
+  - `trainer.py`: `train_from_scratch()`, `finetune_on_samples()`
+  - `evaluator.py`: `evaluate_baseline_4level()`, `export_baseline_summary()`
 
 ### v1.5.0 (2026-01-16)
 - **Multi-Dataset Support**: Pipeline now supports multiple MedMNIST datasets

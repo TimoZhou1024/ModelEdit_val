@@ -543,6 +543,107 @@ class Trainer:
             'error_count': len(misclassified_indices)
         }
 
+    # ================================================================
+    # Baseline Methods
+    # ================================================================
+
+    def train_from_scratch(
+        self,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        epochs: int = 10,
+        learning_rate: float = 1e-4,
+        checkpoint_suffix: str = "retrained"
+    ) -> Dict[str, Any]:
+        """
+        Train a NEW model from scratch (Baseline 1).
+
+        Reinitializes model weights before training.
+
+        Args:
+            train_loader: Training data loader
+            val_loader: Validation data loader
+            epochs: Number of training epochs
+            learning_rate: Learning rate
+            checkpoint_suffix: Suffix for checkpoint filename
+
+        Returns:
+            Training results dictionary
+        """
+        # Reinitialize model (fresh weights from pretrained)
+        print("\nReinitializing model from pretrained weights...")
+        self.model = None
+        self.setup_model()
+
+        # Update checkpoint name
+        self.checkpoint_name = f"vit_{self.dataset_name}_{checkpoint_suffix}.pt"
+        self.best_checkpoint_name = f"vit_{self.dataset_name}_{checkpoint_suffix}_best.pt"
+
+        # Reset training state
+        self.current_epoch = 0
+        self.best_acc = 0.0
+        self.training_history = []
+
+        # Train
+        return self.train(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=epochs,
+            learning_rate=learning_rate
+        )
+
+    def finetune_on_samples(
+        self,
+        finetune_loader: DataLoader,
+        val_loader: DataLoader,
+        epochs: int = 5,
+        learning_rate: float = 1e-5,
+        checkpoint_suffix: str = "finetuned_on_errors"
+    ) -> Dict[str, Any]:
+        """
+        Finetune existing model on specific samples (Baseline 2).
+
+        Loads existing finetuned checkpoint and continues training
+        on error samples with lower learning rate.
+
+        Args:
+            finetune_loader: DataLoader with samples to finetune on
+            val_loader: Validation data loader
+            epochs: Number of finetuning epochs
+            learning_rate: Learning rate (should be lower than initial training)
+            checkpoint_suffix: Suffix for checkpoint filename
+
+        Returns:
+            Training results dictionary
+        """
+        # Load existing finetuned model
+        finetuned_path = self.checkpoint_dir / f"vit_{self.dataset_name}_finetuned.pt"
+        if not finetuned_path.exists():
+            raise FileNotFoundError(
+                f"Finetuned model not found: {finetuned_path}. "
+                f"Run --stage train first."
+            )
+
+        print(f"\nLoading finetuned model from: {finetuned_path}")
+        self.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
+
+        # Update checkpoint name for this baseline
+        self.checkpoint_name = f"vit_{self.dataset_name}_{checkpoint_suffix}.pt"
+        self.best_checkpoint_name = f"vit_{self.dataset_name}_{checkpoint_suffix}_best.pt"
+
+        # Reset training state (but keep model weights)
+        self.current_epoch = 0
+        self.best_acc = 0.0
+        self.training_history = []
+
+        # Train with lower learning rate
+        return self.train(
+            train_loader=finetune_loader,
+            val_loader=val_loader,
+            epochs=epochs,
+            learning_rate=learning_rate
+        )
+
 
 def main():
     """Test trainer functionality."""

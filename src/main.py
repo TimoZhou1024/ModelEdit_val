@@ -52,7 +52,8 @@ from evaluator import (
     Evaluator, evaluate_before_after, evaluate_comparative,
     evaluate_edit_samples, compare_edit_samples_before_after, print_edit_samples_comparison,
     evaluate_projection_samples, compare_projection_samples_before_after, print_projection_samples_comparison,
-    export_edit_samples_comparison, export_projection_samples_comparison
+    export_edit_samples_comparison, export_projection_samples_comparison,
+    evaluate_baseline_4level
 )
 
 
@@ -76,7 +77,7 @@ Examples:
         "--stage",
         type=str,
         required=True,
-        choices=["data", "train", "locate", "edit", "eval", "full"],
+        choices=["data", "train", "locate", "edit", "eval", "full", "baseline1", "baseline2"],
         help="Pipeline stage to run"
     )
 
@@ -210,6 +211,20 @@ Examples:
         "--closed-form",
         action="store_true",
         help="Use closed-form solution for head editing (faster, less precise)"
+    )
+
+    # Baseline arguments
+    parser.add_argument(
+        "--baseline-epochs",
+        type=int,
+        default=10,
+        help="Number of epochs for baseline training (default: 10)"
+    )
+    parser.add_argument(
+        "--baseline-lr",
+        type=float,
+        default=1e-5,
+        help="Learning rate for baseline finetuning (default: 1e-5)"
     )
 
     parser.add_argument(
@@ -854,6 +869,294 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
     return evaluator
 
 
+def run_baseline1_stage(args):
+    """
+    Baseline 1: Retrain from Scratch.
+
+    Add error samples to FT-Train dataset, then train a NEW model from scratch.
+    This tests whether simply including the error samples in training helps.
+    """
+    print("\n" + "=" * 70)
+    print(f"BASELINE 1: RETRAIN FROM SCRATCH - {args.dataset.upper()}")
+    print("=" * 70)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Initialize data handler
+    data_handler = DataHandler(
+        dataset_name=args.dataset,
+        data_path=args.data_path,
+        ft_train_ratio=args.ft_train_ratio,
+        random_seed=args.seed,
+        log_dir=args.log_dir
+    )
+    data_handler.load_data()
+    data_handler.create_resplit()
+
+    # Initialize trainer to get transforms and find errors
+    trainer = Trainer(
+        checkpoint_dir=args.checkpoint_dir,
+        log_dir=args.log_dir,
+        num_classes=data_handler.n_classes,
+        dataset_name=args.dataset,
+        n_channels=data_handler.n_channels
+    )
+    trainer.setup_model()
+
+    # Load finetuned model to find misclassified samples
+    finetuned_path = Path(args.checkpoint_dir) / f"vit_{args.dataset}_finetuned.pt"
+    if not finetuned_path.exists():
+        print(f"ERROR: Finetuned model not found at {finetuned_path}")
+        print("Please run --stage train first.")
+        return None
+
+    trainer.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
+    transform = trainer.get_transforms()
+
+    # Get dataloaders
+    dataloaders = data_handler.get_dataloaders(
+        batch_size=args.batch_size,
+        transform=transform,
+        pin_memory=args.pin_memory
+    )
+
+    # Find misclassified samples from Edit-Discovery set
+    print("\nFinding misclassified samples from Edit-Discovery set...")
+    misclassified = trainer.find_misclassified(
+        dataloaders['discovery'],
+        max_samples=args.max_edits
+    )
+
+    if len(misclassified['indices']) == 0:
+        print("No misclassified samples found!")
+        return None
+
+    error_indices = np.array(misclassified['indices'][:args.max_edits])
+    print(f"  Found {len(error_indices)} error samples to include in training")
+
+    # Collect edit samples for evaluation
+    discovery_dataset = data_handler.get_discovery_dataset(transform)
+    images_list = []
+    labels_list = []
+    for idx in error_indices:
+        image, label = discovery_dataset[idx]
+        images_list.append(image)
+        labels_list.append(label)
+
+    edit_images = torch.stack(images_list)
+    edit_labels = torch.tensor(labels_list)
+    edit_indices_list = [int(i) for i in error_indices]
+
+    # Create combined dataset (FT-Train + error samples)
+    print("\nCreating combined training dataset...")
+    combined_dataset = data_handler.get_combined_ft_train_with_errors(
+        error_indices=error_indices,
+        transform=transform
+    )
+
+    from torch.utils.data import DataLoader
+    combined_loader = DataLoader(
+        combined_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=args.pin_memory if args.pin_memory is not None else torch.cuda.is_available()
+    )
+
+    # Train from scratch
+    print(f"\nTraining NEW model from scratch...")
+    print(f"  Epochs: {args.baseline_epochs}")
+    print(f"  Learning rate: {args.lr}")
+    print(f"  Training samples: {len(combined_dataset)}")
+
+    results = trainer.train_from_scratch(
+        train_loader=combined_loader,
+        val_loader=dataloaders['val'],
+        epochs=args.baseline_epochs,
+        learning_rate=args.lr,
+        checkpoint_suffix="retrained"
+    )
+
+    print(f"\n[OK] Baseline 1 training complete!")
+    print(f"  Best accuracy: {results['best_acc']:.2f}%")
+
+    # Load original finetuned model for comparison
+    original_trainer = Trainer(
+        checkpoint_dir=args.checkpoint_dir,
+        log_dir=args.log_dir,
+        num_classes=data_handler.n_classes,
+        dataset_name=args.dataset,
+        n_channels=data_handler.n_channels
+    )
+    original_trainer.setup_model()
+    original_trainer.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
+
+    # Run 4-level evaluation
+    print("\n" + "=" * 70)
+    print("RUNNING 4-LEVEL EVALUATION FOR BASELINE 1")
+    print("=" * 70)
+
+    baseline_results = evaluate_baseline_4level(
+        model_original=original_trainer.model,
+        model_baseline=trainer.model,
+        edit_images=edit_images,
+        edit_labels=edit_labels,
+        edit_indices=edit_indices_list,
+        ft_train_loader=dataloaders['ft_train'],
+        test_loader=dataloaders['test'],
+        discovery_loader=dataloaders['discovery'],
+        device=device,
+        results_dir=args.results_dir,
+        baseline_name="retrain"
+    )
+
+    return baseline_results
+
+
+def run_baseline2_stage(args):
+    """
+    Baseline 2: Finetune on Error Samples Only.
+
+    Load the finetuned model and continue training ONLY on error samples.
+    This tests whether targeted finetuning on errors helps without full retraining.
+    """
+    print("\n" + "=" * 70)
+    print(f"BASELINE 2: FINETUNE ON ERRORS - {args.dataset.upper()}")
+    print("=" * 70)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Initialize data handler
+    data_handler = DataHandler(
+        dataset_name=args.dataset,
+        data_path=args.data_path,
+        ft_train_ratio=args.ft_train_ratio,
+        random_seed=args.seed,
+        log_dir=args.log_dir
+    )
+    data_handler.load_data()
+    data_handler.create_resplit()
+
+    # Initialize trainer
+    trainer = Trainer(
+        checkpoint_dir=args.checkpoint_dir,
+        log_dir=args.log_dir,
+        num_classes=data_handler.n_classes,
+        dataset_name=args.dataset,
+        n_channels=data_handler.n_channels
+    )
+    trainer.setup_model()
+
+    # Load finetuned model to find misclassified samples
+    finetuned_path = Path(args.checkpoint_dir) / f"vit_{args.dataset}_finetuned.pt"
+    if not finetuned_path.exists():
+        print(f"ERROR: Finetuned model not found at {finetuned_path}")
+        print("Please run --stage train first.")
+        return None
+
+    trainer.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
+    transform = trainer.get_transforms()
+
+    # Get dataloaders
+    dataloaders = data_handler.get_dataloaders(
+        batch_size=args.batch_size,
+        transform=transform,
+        pin_memory=args.pin_memory
+    )
+
+    # Find misclassified samples from Edit-Discovery set
+    print("\nFinding misclassified samples from Edit-Discovery set...")
+    misclassified = trainer.find_misclassified(
+        dataloaders['discovery'],
+        max_samples=args.max_edits
+    )
+
+    if len(misclassified['indices']) == 0:
+        print("No misclassified samples found!")
+        return None
+
+    error_indices = np.array(misclassified['indices'][:args.max_edits])
+    print(f"  Found {len(error_indices)} error samples for finetuning")
+
+    # Collect edit samples for evaluation
+    discovery_dataset = data_handler.get_discovery_dataset(transform)
+    images_list = []
+    labels_list = []
+    for idx in error_indices:
+        image, label = discovery_dataset[idx]
+        images_list.append(image)
+        labels_list.append(label)
+
+    edit_images = torch.stack(images_list)
+    edit_labels = torch.tensor(labels_list)
+    edit_indices_list = [int(i) for i in error_indices]
+
+    # Create error samples dataset
+    print("\nCreating error samples dataset...")
+    error_dataset = data_handler.get_error_samples_dataset(
+        error_indices=error_indices,
+        transform=transform
+    )
+
+    from torch.utils.data import DataLoader
+    error_loader = DataLoader(
+        error_dataset,
+        batch_size=min(args.batch_size, len(error_dataset)),
+        shuffle=True,
+        num_workers=0,
+        pin_memory=args.pin_memory if args.pin_memory is not None else torch.cuda.is_available()
+    )
+
+    # Finetune on error samples
+    print(f"\nFinetuning model on error samples...")
+    print(f"  Epochs: {args.baseline_epochs}")
+    print(f"  Learning rate: {args.baseline_lr}")
+    print(f"  Error samples: {len(error_dataset)}")
+
+    results = trainer.finetune_on_samples(
+        finetune_loader=error_loader,
+        val_loader=dataloaders['val'],
+        epochs=args.baseline_epochs,
+        learning_rate=args.baseline_lr,
+        checkpoint_suffix="finetuned_on_errors"
+    )
+
+    print(f"\n[OK] Baseline 2 finetuning complete!")
+    print(f"  Best accuracy: {results['best_acc']:.2f}%")
+
+    # Load original finetuned model for comparison
+    original_trainer = Trainer(
+        checkpoint_dir=args.checkpoint_dir,
+        log_dir=args.log_dir,
+        num_classes=data_handler.n_classes,
+        dataset_name=args.dataset,
+        n_channels=data_handler.n_channels
+    )
+    original_trainer.setup_model()
+    original_trainer.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
+
+    # Run 4-level evaluation
+    print("\n" + "=" * 70)
+    print("RUNNING 4-LEVEL EVALUATION FOR BASELINE 2")
+    print("=" * 70)
+
+    baseline_results = evaluate_baseline_4level(
+        model_original=original_trainer.model,
+        model_baseline=trainer.model,
+        edit_images=edit_images,
+        edit_labels=edit_labels,
+        edit_indices=edit_indices_list,
+        ft_train_loader=dataloaders['ft_train'],
+        test_loader=dataloaders['test'],
+        discovery_loader=dataloaders['discovery'],
+        device=device,
+        results_dir=args.results_dir,
+        baseline_name="finetune_errors"
+    )
+
+    return baseline_results
+
+
 def run_full_pipeline(args):
     """Run complete pipeline from start to finish (4-Set Protocol)."""
     print("\n" + "=" * 70)
@@ -965,6 +1268,10 @@ def main():
         run_eval_stage(args)
     elif args.stage == "full":
         run_full_pipeline(args)
+    elif args.stage == "baseline1":
+        run_baseline1_stage(args)
+    elif args.stage == "baseline2":
+        run_baseline2_stage(args)
     else:
         print(f"Unknown stage: {args.stage}")
         sys.exit(1)

@@ -575,6 +575,88 @@ class DataHandler:
             class_names=self.class_names
         )
 
+    # ================================================================
+    # Baseline Methods
+    # ================================================================
+
+    def get_combined_ft_train_with_errors(
+        self,
+        error_indices: np.ndarray,
+        transform=None
+    ) -> MedMNISTDataset:
+        """
+        Create combined dataset: FT-Train + Error samples from Edit-Discovery.
+
+        For Baseline 1 (Retrain from Scratch):
+        - Combines 90% FT-Train with error samples found in Edit-Discovery
+        - Error samples are added to training data
+
+        Args:
+            error_indices: Indices of error samples within Edit-Discovery set
+            transform: Image transforms
+
+        Returns:
+            Combined MedMNISTDataset
+        """
+        if self.ft_train_indices is None:
+            self.create_resplit()
+
+        # Map error indices from discovery set to original train indices
+        discovery_error_original_indices = self.discovery_indices[error_indices]
+
+        # Combine FT-Train indices with error sample indices
+        combined_indices = np.concatenate([
+            self.ft_train_indices,
+            discovery_error_original_indices
+        ])
+
+        print(f"  Combined dataset: FT-Train ({len(self.ft_train_indices)}) + "
+              f"Errors ({len(error_indices)}) = {len(combined_indices)} samples")
+
+        return MedMNISTDataset(
+            images=self.train_images,
+            labels=self.train_labels,
+            transform=transform,
+            indices=combined_indices,
+            n_channels=self.n_channels,
+            class_names=self.class_names
+        )
+
+    def get_error_samples_dataset(
+        self,
+        error_indices: np.ndarray,
+        transform=None
+    ) -> MedMNISTDataset:
+        """
+        Get only the error samples from Edit-Discovery set.
+
+        For Baseline 2 (Finetune on Errors):
+        - Returns only the misclassified samples for fine-tuning
+
+        Args:
+            error_indices: Indices of error samples within Edit-Discovery set
+            transform: Image transforms
+
+        Returns:
+            MedMNISTDataset containing only error samples
+        """
+        if self.discovery_indices is None:
+            self.create_resplit()
+
+        # Map to original train indices
+        error_original_indices = self.discovery_indices[error_indices]
+
+        print(f"  Error samples dataset: {len(error_original_indices)} samples")
+
+        return MedMNISTDataset(
+            images=self.train_images,
+            labels=self.train_labels,
+            transform=transform,
+            indices=error_original_indices,
+            n_channels=self.n_channels,
+            class_names=self.class_names
+        )
+
     # Legacy aliases for backward compatibility
     def get_train_dataset(self, transform=None) -> MedMNISTDataset:
         """Legacy alias for get_ft_train_dataset()."""
