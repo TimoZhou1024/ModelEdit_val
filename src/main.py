@@ -187,6 +187,18 @@ Examples:
         default=30,
         help="Max number of samples to edit (default: 30)"
     )
+    parser.add_argument(
+        "--projection-samples",
+        type=int,
+        default=500,
+        help="Number of FT-Train samples for projection matrix construction (default: 500)"
+    )
+    parser.add_argument(
+        "--nullspace-threshold",
+        type=float,
+        default=1e-2,
+        help="Threshold for null-space eigenvalue selection (default: 1e-2)"
+    )
 
     # Head editing specific arguments
     parser.add_argument(
@@ -600,7 +612,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
             layers=edit_layers,
             v_num_grad_steps=25,
             v_lr=0.1,
-            L2=1e-4
+            L2=1e-4,
+            nullspace_threshold=args.nullspace_threshold
         )
 
         editor = Editor(
@@ -613,10 +626,10 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
 
         # Precompute projection matrices
         # IMPORTANT: Use FT-Train (stats_loader) for covariance computation!
-        print("\nPrecomputing null-space projections (using FT-Train for stats)...")
+        print(f"\nPrecomputing null-space projections (using {args.projection_samples} FT-Train samples)...")
         editor.precompute_projection(
             stats_loader=dataloaders['ft_train'],
-            num_samples=500,
+            num_samples=args.projection_samples,
             track_samples=True  # Track samples for before/after evaluation
         )
 

@@ -301,6 +301,8 @@ Both baselines use the same evaluation framework:
 | `--num-edit-layers` | 3 | Number of top ASTRA layers to edit |
 | `--no-astra-layers` | False | Disable ASTRA layer selection, use default [9,10,11] |
 | `--max-edits` | 30 | Maximum samples to edit |
+| `--projection-samples` | 500 | Number of FT-Train samples for projection matrix construction |
+| `--nullspace-threshold` | 1e-2 | Threshold for null-space eigenvalue selection |
 
 ### Head Editing Options
 | Argument | Default | Description |
@@ -358,6 +360,9 @@ uv run python src/main.py --stage full --dataset dermamnist --num-edit-layers 5
 
 # AlphaEdit with manually specified layers
 uv run python src/main.py --stage full --dataset dermamnist --edit-layers 4 5 6
+
+# AlphaEdit with custom projection matrix settings
+uv run python src/main.py --stage edit --dataset pathmnist --projection-samples 1000 --nullspace-threshold 1e-3
 
 # Head Editing (simpler, faster)
 uv run python src/main.py --stage full --dataset organamnist --edit-method head
