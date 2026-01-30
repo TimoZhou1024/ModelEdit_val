@@ -1,44 +1,54 @@
 #!/usr/bin/env python
 """
-Parameter Search Script for Model Editing
+Parameter Search Script for Model Editing (v2)
 
 This script explores different parameter combinations to find optimal editing settings.
-It systematically varies:
-- --num-edit-layers (ASTRA-based layer selection)
-- --edit-layers (fixed layer specification, mutually exclusive with num-edit-layers)
-- --max-samples (samples for layer analysis)
-- --max-edits (number of edits to apply)
+It runs both edit and eval stages to collect complete metrics including test set results.
 
-Results are saved to a summary CSV for analysis.
+Search Dimensions:
+- --datasets: MedMNIST datasets to search
+- --projection-samples-range: Number of FT-Train samples for projection matrix
+- --nullspace-threshold-range: Eigenvalue threshold for null-space selection
+- --num-edit-layers-range: Number of top ASTRA layers to edit
+- --fixed-edit-layers: Fixed layer combinations (alternative to ASTRA)
+- --max-edits-range: Number of error samples to edit
+
+Multi-GPU Support:
+- --parallel N: Run N experiments in parallel (default: 1)
+- --parallel 0: Auto-detect GPU count and use all
+- --gpu N: Pin all experiments to GPU N
+- Backward compatible with CPU-only execution
+
+Output Structure:
+    results/{dataset}/proj{N}_edit{M}_{layer_mode}{L}_thresh{T}/
+        ├── comparative_evaluation_edit_samples.csv
+        ├── comparative_evaluation_projection_samples.csv
+        ├── comparative_evaluation_test_set.csv
+        └── comparative_evaluation_edit_discovery_set.csv
 
 Usage Examples:
 --------------
-1. Quick test run (dry run to see what would be executed):
-   uv run python scripts/param_search.py --dry-run --max-experiments 5
+1. Quick dry run:
+   uv run python scripts/param_search.py --dry-run
 
-2. Search with ASTRA-based layer selection (default):
-   uv run python scripts/param_search.py --dataset pathmnist --max-experiments 20
+2. Single dataset, minimal search:
+   uv run python scripts/param_search.py --datasets pathmnist \\
+       --max-edits-range 30 --num-edit-layers-range 3 --max-experiments 5
 
-3. Search with fixed layer combinations:
-   uv run python scripts/param_search.py --dataset pathmnist \\
-       --fixed-edit-layers "11" "10,11" "9,10,11" "8,9,10,11" \\
-       --num-edit-layers-range 0
+3. Full search with multiple parameters:
+   uv run python scripts/param_search.py --datasets pathmnist dermamnist \\
+       --projection-samples-range 300 500 1000 \\
+       --max-edits-range 10 30 50 \\
+       --num-edit-layers-range 1 3 5
 
-4. Full search (ASTRA + fixed layers):
-   uv run python scripts/param_search.py --dataset pathmnist \\
-       --num-edit-layers-range 1 2 3 4 5 \\
-       --fixed-edit-layers "11" "10,11" "9,10,11" \\
-       --max-samples-range 30 50 100 \\
-       --max-edits-range 10 20 30 50
+4. Multi-GPU parallel execution (8x 3090):
+   uv run python scripts/param_search.py --datasets pathmnist --parallel 0
 
-5. Continue from a specific experiment:
+5. Single GPU execution:
+   uv run python scripts/param_search.py --datasets pathmnist --gpu 0
+
+6. Continue from specific experiment:
    uv run python scripts/param_search.py --continue-from 10
-
-Output Files:
-------------
-- param_search_results/param_search_summary_{dataset}.csv  - Summary of all experiments
-- param_search_results/param_search_details_{dataset}.json - Detailed experiment records
-- results/exp_XXX/  - Individual experiment results
 """
 
 import os
@@ -50,8 +60,8 @@ import csv
 import time
 from datetime import datetime
 from pathlib import Path
-from itertools import product
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Add src to path
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -60,26 +70,111 @@ SRC_DIR = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 
+def detect_gpu_count() -> int:
+    """Detect number of available GPUs."""
+    try:
+        import torch
+        return torch.cuda.device_count()
+    except ImportError:
+        return 0
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Parameter search for optimal model editing configuration",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description="Parameter search for optimal model editing configuration (v2)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+
+    # === Dataset Selection ===
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        nargs="+",
+        default=["pathmnist"],
+        help="MedMNIST datasets to search (default: pathmnist). "
+             "Options: pathmnist, dermamnist, retinamnist, organamnist, bloodmnist, tissuemnist"
+    )
+
+    # === Search Space Configuration ===
+    parser.add_argument(
+        "--projection-samples-range",
+        type=int,
+        nargs="+",
+        default=[500],
+        help="Values for --projection-samples to search (default: [500])"
     )
 
     parser.add_argument(
-        "--dataset",
-        type=str,
-        default="pathmnist",
-        help="MedMNIST dataset to use (default: pathmnist)"
+        "--nullspace-threshold-range",
+        type=float,
+        nargs="+",
+        default=[1e-2],
+        help="Values for --nullspace-threshold to search (default: [1e-2])"
     )
 
+    parser.add_argument(
+        "--num-edit-layers-range",
+        type=int,
+        nargs="+",
+        default=[1, 2, 3, 4, 5],
+        help="Values for --num-edit-layers to search in ASTRA mode (default: [1,2,3,4,5])"
+    )
+
+    parser.add_argument(
+        "--fixed-edit-layers",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Fixed layer combinations to test, e.g. '9,10,11' '10,11' '11'. "
+             "These are alternatives to ASTRA-based layer selection."
+    )
+
+    parser.add_argument(
+        "--max-edits-range",
+        type=int,
+        nargs="+",
+        default=[10, 20, 30, 50],
+        help="Values for --max-edits to search (default: [10,20,30,50])"
+    )
+
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=50,
+        help="Fixed value for --max-samples (locator stage, not searched) (default: 50)"
+    )
+
+    # === Output Configuration ===
     parser.add_argument(
         "--output-dir",
         type=str,
         default="param_search_results",
-        help="Directory to save search results (default: param_search_results)"
+        help="Directory to save search summary (default: param_search_results)"
     )
 
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        default="results",
+        help="Base directory for experiment results (default: results)"
+    )
+
+    parser.add_argument(
+        "--logs-dir",
+        type=str,
+        default="logs",
+        help="Base directory for experiment logs (default: logs)"
+    )
+
+    parser.add_argument(
+        "--checkpoints-dir",
+        type=str,
+        default="checkpoints",
+        help="Base directory for model checkpoints (default: checkpoints)"
+    )
+
+    # === Execution Control ===
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -90,7 +185,7 @@ def parse_args():
         "--continue-from",
         type=int,
         default=0,
-        help="Continue from experiment N (skip first N-1 experiments)"
+        help="Continue from experiment N (skip first N experiments)"
     )
 
     parser.add_argument(
@@ -100,221 +195,264 @@ def parse_args():
         help="Maximum number of experiments to run"
     )
 
-    # Search space configuration
+    # === GPU/Parallelism Configuration ===
     parser.add_argument(
-        "--num-edit-layers-range",
+        "--parallel",
         type=int,
-        nargs="+",
-        default=[1, 2, 3, 4, 5],
-        help="Values for --num-edit-layers to search (ASTRA mode)"
+        default=1,
+        help="Number of parallel experiments. 0 = auto (use all GPUs). Default: 1"
     )
 
     parser.add_argument(
-        "--fixed-edit-layers",
-        type=str,
-        nargs="+",
+        "--gpu",
+        type=int,
         default=None,
-        help="Fixed layer combinations to test, e.g. '9,10,11' '10,11' '11'"
+        help="Pin all experiments to specific GPU ID. Default: None (auto)"
     )
 
     parser.add_argument(
-        "--max-samples-range",
+        "--timeout",
         type=int,
-        nargs="+",
-        default=[30, 50, 100],
-        help="Values for --max-samples to search"
-    )
-
-    parser.add_argument(
-        "--max-edits-range",
-        type=int,
-        nargs="+",
-        default=[10, 20, 30, 50],
-        help="Values for --max-edits to search"
+        default=7200,
+        help="Timeout per experiment in seconds (default: 7200 = 2 hours)"
     )
 
     return parser.parse_args()
+
+
+def format_threshold(threshold: float) -> str:
+    """Format threshold for directory naming (e.g., 1e-2 -> '1e-2')."""
+    if threshold >= 1:
+        return str(int(threshold))
+    # Format as scientific notation without '+' sign
+    exp = int(f"{threshold:.0e}".split("e")[1])
+    mantissa = threshold / (10 ** exp)
+    if mantissa == 1:
+        return f"1e{exp}"
+    return f"{mantissa:.0f}e{exp}"
+
+
+def build_run_name(config: Dict[str, Any]) -> str:
+    """Build structured run name from config."""
+    dataset = config['dataset']
+    proj = config['projection_samples']
+    edit = config['max_edits']
+    thresh = format_threshold(config['nullspace_threshold'])
+
+    if config['mode'] == 'astra':
+        layer_desc = f"astra{config['num_edit_layers']}"
+    else:
+        layers = config['edit_layers']
+        layer_desc = f"fixed{'-'.join(map(str, layers))}"
+
+    return f"{dataset}/proj{proj}_edit{edit}_{layer_desc}_thresh{thresh}"
 
 
 def build_experiment_configs(args) -> List[Dict[str, Any]]:
     """Build list of experiment configurations to run."""
     configs = []
 
-    # ASTRA-based experiments (using --num-edit-layers)
-    # Skip if num_edit_layers_range only contains 0 (used to disable ASTRA mode)
-    astra_layers = [n for n in args.num_edit_layers_range if n > 0]
-    for num_layers in astra_layers:
-        for max_samples in args.max_samples_range:
-            for max_edits in args.max_edits_range:
-                config = {
-                    'mode': 'astra',
-                    'num_edit_layers': num_layers,
-                    'edit_layers': None,
-                    'max_samples': max_samples,
-                    'max_edits': max_edits,
-                }
-                configs.append(config)
-
-    # Fixed layer experiments (using --edit-layers)
-    if args.fixed_edit_layers:
-        for layers_str in args.fixed_edit_layers:
-            layers = [int(x) for x in layers_str.split(',')]
-            for max_samples in args.max_samples_range:
+    for dataset in args.datasets:
+        for proj_samples in args.projection_samples_range:
+            for threshold in args.nullspace_threshold_range:
                 for max_edits in args.max_edits_range:
-                    config = {
-                        'mode': 'fixed',
-                        'num_edit_layers': None,
-                        'edit_layers': layers,
-                        'max_samples': max_samples,
-                        'max_edits': max_edits,
-                    }
-                    configs.append(config)
+                    # ASTRA-based experiments
+                    astra_layers = [n for n in args.num_edit_layers_range if n > 0]
+                    for num_layers in astra_layers:
+                        configs.append({
+                            'dataset': dataset,
+                            'mode': 'astra',
+                            'num_edit_layers': num_layers,
+                            'edit_layers': None,
+                            'projection_samples': proj_samples,
+                            'nullspace_threshold': threshold,
+                            'max_edits': max_edits,
+                            'max_samples': args.max_samples,
+                        })
+
+                    # Fixed layer experiments
+                    if args.fixed_edit_layers:
+                        for layers_str in args.fixed_edit_layers:
+                            layers = [int(x) for x in layers_str.split(',')]
+                            configs.append({
+                                'dataset': dataset,
+                                'mode': 'fixed',
+                                'num_edit_layers': None,
+                                'edit_layers': layers,
+                                'projection_samples': proj_samples,
+                                'nullspace_threshold': threshold,
+                                'max_edits': max_edits,
+                                'max_samples': args.max_samples,
+                            })
 
     return configs
 
 
-def build_command(config: Dict[str, Any], args, run_name: str) -> List[str]:
-    """Build command line for running main.py with given config."""
-    cmd = [
+def build_commands(config: Dict[str, Any], args, run_name: str) -> Tuple[List[str], List[str]]:
+    """Build command lines for edit and eval stages."""
+    base_cmd = [
         sys.executable,
         str(SRC_DIR / "main.py"),
-        "--stage", "edit",
-        "--dataset", args.dataset,
+        "--dataset", config['dataset'],
         "--run-name", run_name,
         "--max-samples", str(config['max_samples']),
         "--max-edits", str(config['max_edits']),
+        "--projection-samples", str(config['projection_samples']),
+        "--nullspace-threshold", str(config['nullspace_threshold']),
+        "--checkpoint-dir", args.checkpoints_dir,
+        "--log-dir", args.logs_dir,
+        "--results-dir", args.results_dir,
     ]
 
-    if config['mode'] == 'astra':
-        # Use ASTRA-based layer selection
-        cmd.extend(["--num-edit-layers", str(config['num_edit_layers'])])
-        # Ensure ASTRA is enabled (default, but be explicit)
-        cmd.append("--use-astra-layers")
-    else:
-        # Use fixed layer specification
-        cmd.append("--no-astra-layers")
-        cmd.extend(["--edit-layers"] + [str(l) for l in config['edit_layers']])
+    # Edit stage command
+    cmd_edit = base_cmd + ["--stage", "edit"]
 
-    return cmd
+    if config['mode'] == 'astra':
+        cmd_edit.extend(["--num-edit-layers", str(config['num_edit_layers'])])
+    else:
+        cmd_edit.append("--no-astra-layers")
+        cmd_edit.extend(["--edit-layers"] + [str(layer) for layer in config['edit_layers']])
+
+    # Eval stage command
+    cmd_eval = base_cmd + ["--stage", "eval"]
+
+    return cmd_edit, cmd_eval
+
+
+def parse_metric_csv(csv_path: Path) -> Dict[str, Any]:
+    """Parse a metric CSV file (format: metric,value,notes)."""
+    metrics = {}
+    if not csv_path.exists():
+        return metrics
+
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                metric = row.get('metric', '')
+                value = row.get('value', '')
+                try:
+                    # Try to parse as float
+                    metrics[metric] = float(value)
+                except (ValueError, TypeError):
+                    metrics[metric] = value
+    except Exception as e:
+        print(f"Warning: Failed to parse {csv_path}: {e}")
+
+    return metrics
 
 
 def parse_results(results_dir: Path) -> Dict[str, Any]:
     """Parse results from a completed experiment."""
     results = {}
 
-    # Parse test set comparative evaluation
-    test_csv = results_dir / "comparative_evaluation_test_set.csv"
-    if test_csv.exists():
-        with open(test_csv, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                metric = row['metric']
-                value = row['value']
-                try:
-                    value = float(value)
-                except ValueError:
-                    pass
-                results[f'test_{metric}'] = value
+    # Define CSV files to parse and their prefixes
+    csv_files = [
+        ("comparative_evaluation_edit_samples.csv", "edit"),
+        ("comparative_evaluation_projection_samples.csv", "proj"),
+        ("comparative_evaluation_test_set.csv", "test"),
+        ("comparative_evaluation_edit_discovery_set.csv", "discovery"),
+    ]
 
-    # Parse edit discovery set comparative evaluation
-    discovery_csv = results_dir / "comparative_evaluation_edit_discovery_set.csv"
-    if discovery_csv.exists():
-        with open(discovery_csv, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                metric = row['metric']
-                value = row['value']
-                try:
-                    value = float(value)
-                except ValueError:
-                    pass
-                results[f'discovery_{metric}'] = value
+    for csv_name, prefix in csv_files:
+        csv_path = results_dir / csv_name
+        metrics = parse_metric_csv(csv_path)
 
-    # Parse projection samples (knowledge preservation)
-    proj_csv = results_dir / "comparative_evaluation_projection_samples.csv"
-    if proj_csv.exists():
-        with open(proj_csv, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                metric = row['metric']
-                value = row['value']
-                try:
-                    value = float(value)
-                except ValueError:
-                    pass
-                results[f'proj_{metric}'] = value
-
-    # Parse edit samples
-    edit_csv = results_dir / "comparative_evaluation_edit_samples.csv"
-    if edit_csv.exists():
-        with open(edit_csv, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                metric = row['metric']
-                value = row['value']
-                try:
-                    value = float(value)
-                except ValueError:
-                    pass
-                results[f'edit_{metric}'] = value
+        for metric, value in metrics.items():
+            results[f'{prefix}_{metric}'] = value
 
     return results
 
 
-def run_experiment(config: Dict[str, Any], args, exp_idx: int) -> Dict[str, Any]:
-    """Run a single experiment and return results."""
-    run_name = f"exp_{exp_idx:03d}"
+def run_experiment_worker(
+    exp_idx: int,
+    config: Dict[str, Any],
+    args,
+    gpu_id: Optional[int] = None
+) -> Dict[str, Any]:
+    """Worker function to run a single experiment."""
+    run_name = build_run_name(config)
 
-    # Build command
-    cmd = build_command(config, args, run_name)
+    # Build commands
+    cmd_edit, cmd_eval = build_commands(config, args, run_name)
 
     # Create experiment record
     experiment = {
         'exp_idx': exp_idx,
         'run_name': run_name,
         'config': config,
-        'command': ' '.join(cmd),
+        'command_edit': ' '.join(cmd_edit),
+        'command_eval': ' '.join(cmd_eval),
         'status': 'pending',
+        'gpu_id': gpu_id,
         'start_time': None,
         'end_time': None,
         'duration_seconds': None,
         'results': {},
     }
 
-    print(f"\n{'='*70}")
-    print(f"EXPERIMENT {exp_idx}: {run_name}")
-    print(f"{'='*70}")
-    print(f"Config: {json.dumps(config, indent=2)}")
-    print(f"Command: {' '.join(cmd)}")
-
     if args.dry_run:
-        print("[DRY RUN] Skipping execution")
+        print(f"\n[DRY RUN] Experiment {exp_idx}: {run_name}")
+        print(f"  GPU: {gpu_id if gpu_id is not None else 'auto'}")
+        print(f"  Edit: {' '.join(cmd_edit)}")
+        print(f"  Eval: {' '.join(cmd_eval)}")
         experiment['status'] = 'skipped'
         return experiment
 
-    # Run experiment
+    # Setup environment for GPU
+    env = os.environ.copy()
+    if gpu_id is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    print(f"\n{'='*70}")
+    print(f"EXPERIMENT {exp_idx}: {run_name}")
+    print(f"{'='*70}")
+    print(f"GPU: {gpu_id if gpu_id is not None else 'auto'}")
+    print(f"Config: {json.dumps(config, indent=2)}")
+
     experiment['start_time'] = datetime.now().isoformat()
     start = time.time()
 
     try:
-        result = subprocess.run(
-            cmd,
+        # Run edit stage
+        print("\n--- Running EDIT stage ---")
+        result_edit = subprocess.run(
+            cmd_edit,
             capture_output=True,
             text=True,
             cwd=str(PROJECT_ROOT),
-            timeout=3600  # 1 hour timeout
+            env=env,
+            timeout=args.timeout
         )
 
-        experiment['status'] = 'success' if result.returncode == 0 else 'failed'
-        experiment['returncode'] = result.returncode
+        if result_edit.returncode != 0:
+            print(f"[ERROR] Edit stage failed with return code {result_edit.returncode}")
+            print(f"STDERR (last 2000 chars): {result_edit.stderr[-2000:]}")
+            experiment['status'] = 'failed_edit'
+            experiment['error'] = result_edit.stderr[-2000:]
+        else:
+            # Run eval stage
+            print("\n--- Running EVAL stage ---")
+            result_eval = subprocess.run(
+                cmd_eval,
+                capture_output=True,
+                text=True,
+                cwd=str(PROJECT_ROOT),
+                env=env,
+                timeout=args.timeout
+            )
 
-        if result.returncode != 0:
-            print(f"[ERROR] Experiment failed with return code {result.returncode}")
-            print(f"STDERR: {result.stderr[-2000:]}")  # Last 2000 chars
+            if result_eval.returncode != 0:
+                print(f"[ERROR] Eval stage failed with return code {result_eval.returncode}")
+                print(f"STDERR (last 2000 chars): {result_eval.stderr[-2000:]}")
+                experiment['status'] = 'failed_eval'
+                experiment['error'] = result_eval.stderr[-2000:]
+            else:
+                experiment['status'] = 'success'
 
     except subprocess.TimeoutExpired:
         experiment['status'] = 'timeout'
-        print("[ERROR] Experiment timed out (1 hour)")
+        print(f"[ERROR] Experiment timed out ({args.timeout}s)")
     except Exception as e:
         experiment['status'] = 'error'
         experiment['error'] = str(e)
@@ -326,15 +464,18 @@ def run_experiment(config: Dict[str, Any], args, exp_idx: int) -> Dict[str, Any]
 
     # Parse results if successful
     if experiment['status'] == 'success':
-        results_dir = PROJECT_ROOT / "results" / run_name
-        if results_dir.exists():
-            experiment['results'] = parse_results(results_dir)
+        results_path = Path(args.results_dir) / run_name
+        if results_path.exists():
+            experiment['results'] = parse_results(results_path)
             print(f"\nResults Summary:")
-            for k, v in experiment['results'].items():
-                if isinstance(v, float):
-                    print(f"  {k}: {v:.4f}")
-                else:
-                    print(f"  {k}: {v}")
+            # Print key metrics
+            for key in ['edit_fix_rate', 'test_accuracy_delta', 'proj_stability']:
+                if key in experiment['results']:
+                    val = experiment['results'][key]
+                    if isinstance(val, float):
+                        print(f"  {key}: {val:.4f}")
+                    else:
+                        print(f"  {key}: {val}")
 
     return experiment
 
@@ -352,13 +493,13 @@ def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
         result_keys.update(exp['results'].keys())
 
     # Build header
-    base_columns = ['exp_idx', 'run_name', 'status', 'duration_seconds']
+    base_columns = ['exp_idx', 'run_name', 'status', 'duration_seconds', 'gpu_id']
     config_columns = sorted(config_keys)
     result_columns = sorted(result_keys)
     all_columns = base_columns + config_columns + result_columns
 
     # Write CSV
-    with open(output_path, 'w', newline='') as f:
+    with open(output_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=all_columns)
         writer.writeheader()
 
@@ -368,6 +509,7 @@ def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
                 'run_name': exp['run_name'],
                 'status': exp['status'],
                 'duration_seconds': exp.get('duration_seconds'),
+                'gpu_id': exp.get('gpu_id'),
             }
             # Add config values
             for k in config_columns:
@@ -396,23 +538,43 @@ def main():
     configs = build_experiment_configs(args)
     total_experiments = len(configs)
 
-    print("="*70)
-    print("PARAMETER SEARCH FOR MODEL EDITING")
-    print("="*70)
-    print(f"Dataset: {args.dataset}")
+    # Determine parallelism
+    num_gpus = detect_gpu_count()
+    if args.gpu is not None:
+        # Pin to specific GPU
+        parallel = 1
+        gpu_ids = [args.gpu]
+    elif args.parallel == 0:
+        # Auto: use all GPUs
+        parallel = max(1, num_gpus)
+        gpu_ids = list(range(num_gpus)) if num_gpus > 0 else [None]
+    else:
+        parallel = args.parallel
+        gpu_ids = list(range(min(parallel, num_gpus))) if num_gpus > 0 else [None] * parallel
+
+    print("=" * 70)
+    print("PARAMETER SEARCH FOR MODEL EDITING (v2)")
+    print("=" * 70)
+    print(f"Datasets: {args.datasets}")
     print(f"Total experiments: {total_experiments}")
     print(f"Output directory: {output_dir}")
+    print(f"Detected GPUs: {num_gpus}")
+    print(f"Parallel workers: {parallel}")
+    print(f"GPU IDs: {gpu_ids}")
 
     if args.dry_run:
         print("\n[DRY RUN MODE - No experiments will be executed]")
 
     # Show search space
     print(f"\nSearch Space:")
-    print(f"  --num-edit-layers: {args.num_edit_layers_range}")
+    print(f"  --datasets: {args.datasets}")
+    print(f"  --projection-samples-range: {args.projection_samples_range}")
+    print(f"  --nullspace-threshold-range: {args.nullspace_threshold_range}")
+    print(f"  --num-edit-layers-range: {args.num_edit_layers_range}")
     if args.fixed_edit_layers:
-        print(f"  --edit-layers: {args.fixed_edit_layers}")
-    print(f"  --max-samples: {args.max_samples_range}")
-    print(f"  --max-edits: {args.max_edits_range}")
+        print(f"  --fixed-edit-layers: {args.fixed_edit_layers}")
+    print(f"  --max-edits-range: {args.max_edits_range}")
+    print(f"  --max-samples (fixed): {args.max_samples}")
 
     # Apply filters
     start_idx = args.continue_from
@@ -422,31 +584,72 @@ def main():
         end_idx = total_experiments
 
     configs_to_run = configs[start_idx:end_idx]
-    print(f"\nRunning experiments {start_idx} to {end_idx-1} ({len(configs_to_run)} experiments)")
+    print(f"\nRunning experiments {start_idx} to {end_idx - 1} ({len(configs_to_run)} experiments)")
 
     # Run experiments
     experiments = []
-    for i, config in enumerate(configs_to_run):
-        exp_idx = start_idx + i
-        experiment = run_experiment(config, args, exp_idx)
-        experiments.append(experiment)
 
-        # Save intermediate results
-        summary_path = output_dir / f"param_search_summary_{args.dataset}.csv"
-        save_summary_csv(experiments, summary_path)
+    if parallel == 1:
+        # Sequential execution
+        for i, config in enumerate(configs_to_run):
+            exp_idx = start_idx + i
+            gpu_id = gpu_ids[0] if gpu_ids and gpu_ids[0] is not None else None
+            experiment = run_experiment_worker(exp_idx, config, args, gpu_id)
+            experiments.append(experiment)
 
-        # Save detailed JSON
-        json_path = output_dir / f"param_search_details_{args.dataset}.json"
-        with open(json_path, 'w') as f:
-            json.dump(experiments, f, indent=2)
+            # Save intermediate results
+            summary_path = output_dir / "param_search_summary.csv"
+            save_summary_csv(experiments, summary_path)
+
+            # Save detailed JSON
+            json_path = output_dir / "param_search_details.json"
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(experiments, f, indent=2)
+
+    else:
+        # Parallel execution
+        with ProcessPoolExecutor(max_workers=parallel) as executor:
+            futures = {}
+            for i, config in enumerate(configs_to_run):
+                exp_idx = start_idx + i
+                # Round-robin GPU assignment
+                gpu_id = gpu_ids[i % len(gpu_ids)] if gpu_ids else None
+                future = executor.submit(
+                    run_experiment_worker, exp_idx, config, args, gpu_id
+                )
+                futures[future] = exp_idx
+
+            for future in as_completed(futures):
+                exp_idx = futures[future]
+                try:
+                    experiment = future.result()
+                    experiments.append(experiment)
+                except Exception as e:
+                    print(f"[ERROR] Experiment {exp_idx} raised exception: {e}")
+                    experiments.append({
+                        'exp_idx': exp_idx,
+                        'status': 'exception',
+                        'error': str(e),
+                        'config': configs_to_run[exp_idx - start_idx],
+                        'results': {}
+                    })
+
+                # Save intermediate results
+                experiments_sorted = sorted(experiments, key=lambda x: x['exp_idx'])
+                summary_path = output_dir / "param_search_summary.csv"
+                save_summary_csv(experiments_sorted, summary_path)
+
+                json_path = output_dir / "param_search_details.json"
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(experiments_sorted, f, indent=2)
 
     # Final summary
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("PARAMETER SEARCH COMPLETE")
-    print("="*70)
+    print("=" * 70)
 
     successful = sum(1 for e in experiments if e['status'] == 'success')
-    failed = sum(1 for e in experiments if e['status'] == 'failed')
+    failed = sum(1 for e in experiments if e['status'].startswith('failed'))
     print(f"Successful: {successful}/{len(experiments)}")
     print(f"Failed: {failed}/{len(experiments)}")
 
@@ -467,15 +670,16 @@ def main():
             print(f"\nBest Configuration (by test accuracy delta):")
             print(f"  Experiment: {best_exp['run_name']}")
             print(f"  Config: {json.dumps(best_exp['config'], indent=4)}")
-            print(f"  Test Accuracy Delta: {best_metric*100:+.2f}%")
+            print(f"  Test Accuracy Delta: {best_metric * 100:+.2f}%")
 
-            # Show other metrics
-            if 'proj_stability' in best_exp['results']:
-                print(f"  Projection Stability: {best_exp['results']['proj_stability']*100:.1f}%")
-            if 'edit_fix_rate' in best_exp['results']:
-                print(f"  Edit Fix Rate: {best_exp['results']['edit_fix_rate']*100:.1f}%")
+            # Show other key metrics
+            for key in ['proj_stability', 'edit_fix_rate']:
+                if key in best_exp['results']:
+                    print(f"  {key}: {best_exp['results'][key] * 100:.1f}%")
 
     print(f"\nResults saved to: {output_dir}")
+    print(f"  Summary CSV: {output_dir}/param_search_summary.csv")
+    print(f"  Details JSON: {output_dir}/param_search_details.json")
 
 
 if __name__ == "__main__":

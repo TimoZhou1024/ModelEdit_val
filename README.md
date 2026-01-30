@@ -480,7 +480,202 @@ Where:
 
 The null-space projection P ensures edits don't affect predictions for correctly classified samples.
 
+## Parameter Search & Experiment Guide
+
+This section describes how to run systematic parameter searches to find optimal editing configurations.
+
+### Parameter Search Scripts
+
+Two scripts are provided for systematic experimentation:
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/param_search.py` | Run parameter grid search (edit + eval stages) |
+| `scripts/collect_results.py` | Aggregate metrics from completed experiments |
+
+### Quick Start Examples
+
+```bash
+# 1. Dry run - see what experiments would be generated
+uv run python scripts/param_search.py --dry-run
+
+# 2. Minimal search on single dataset
+uv run python scripts/param_search.py --datasets pathmnist \
+    --max-edits-range 30 --num-edit-layers-range 3 --max-experiments 5
+
+# 3. Full search with multiple parameters
+uv run python scripts/param_search.py --datasets pathmnist \
+    --projection-samples-range 300 500 1000 \
+    --max-edits-range 10 30 50 \
+    --num-edit-layers-range 1 3 5
+
+# 4. Multi-dataset search
+uv run python scripts/param_search.py --datasets pathmnist dermamnist organamnist
+
+# 5. Multi-GPU parallel execution (auto-detect all GPUs)
+uv run python scripts/param_search.py --datasets pathmnist --parallel 0
+
+# 6. Pin to specific GPU
+uv run python scripts/param_search.py --datasets pathmnist --gpu 0
+
+# 7. Continue from a specific experiment
+uv run python scripts/param_search.py --continue-from 10
+
+# 8. Collect results after experiments
+uv run python scripts/collect_results.py --results-dir results
+```
+
+### Searchable Parameters
+
+| Parameter | CLI Argument | Default | Description |
+|-----------|--------------|---------|-------------|
+| Dataset | `--datasets` | `[pathmnist]` | MedMNIST datasets to search |
+| Projection Samples | `--projection-samples-range` | `[500]` | Number of FT-Train samples for null-space projection |
+| Nullspace Threshold | `--nullspace-threshold-range` | `[1e-2]` | Eigenvalue threshold for null-space selection |
+| Num Edit Layers | `--num-edit-layers-range` | `[1,2,3,4,5]` | Top-K ASTRA layers to edit |
+| Fixed Edit Layers | `--fixed-edit-layers` | None | Specific layer combinations (e.g., `9,10,11`) |
+| Max Edits | `--max-edits-range` | `[10,20,30,50]` | Number of error samples to edit |
+| Max Samples | `--max-samples` | `50` | Max samples for ASTRA locator (fixed, not searched) |
+
+### Execution Control
+
+| Parameter | CLI Argument | Default | Description |
+|-----------|--------------|---------|-------------|
+| Parallel Workers | `--parallel` | `1` | Number of parallel experiments (0 = auto = GPU count) |
+| GPU Selection | `--gpu` | None | Pin to specific GPU ID |
+| Continue From | `--continue-from` | `0` | Skip first N experiments |
+| Max Experiments | `--max-experiments` | None | Limit total experiments |
+| Timeout | `--timeout` | `7200` | Per-experiment timeout in seconds |
+| Dry Run | `--dry-run` | False | Preview commands without executing |
+
+### Output Structure
+
+```
+param_search_results/
+├── param_search_summary.csv      # All experiments with metrics
+└── param_search_details.json     # Detailed experiment records
+
+results/{dataset}/proj{N}_edit{M}_{layer_mode}{L}_thresh{T}/
+├── comparative_evaluation_edit_samples.csv
+├── comparative_evaluation_projection_samples.csv
+├── comparative_evaluation_test_set.csv
+└── comparative_evaluation_edit_discovery_set.csv
+```
+
+### Core Metrics
+
+The parameter search collects these key metrics for each experiment:
+
+**Edit Performance** (on error samples used for editing):
+- `edit_total_wrong`: Total error samples edited
+- `edit_num_fixed`: Samples corrected after editing
+- `edit_fix_ratio`: Fraction of errors fixed
+
+**Test Performance** (on held-out test set):
+- `test_total`: Total test samples
+- `test_acc_before` / `test_acc_after`: Accuracy before/after editing
+- `test_acc_delta`: Accuracy change (+improvement, -regression)
+- `test_correct_to_wrong`: Regressions (correct → wrong)
+- `test_wrong_to_correct`: Fixes (wrong → correct)
+
+**Projection Stability** (on FT-Train samples):
+- `proj_stability`: Fraction of correct samples preserved
+- `proj_regression_rate`: Fraction of correct samples broken
+
+### Recommended Search Strategy
+
+For efficient exploration, use a "coarse-to-fine" strategy:
+
+**Phase 1: Coarse Search** (find promising regions)
+```bash
+uv run python scripts/param_search.py --datasets pathmnist \
+    --num-edit-layers-range 1 3 5 \
+    --max-edits-range 10 30 50 \
+    --projection-samples-range 500
+```
+
+**Phase 2: Fine Search** (refine best configurations)
+```bash
+# After analyzing Phase 1 results, if layers=3 and edits=30 look best:
+uv run python scripts/param_search.py --datasets pathmnist \
+    --num-edit-layers-range 2 3 4 \
+    --max-edits-range 20 30 40 \
+    --projection-samples-range 300 500 1000 \
+    --nullspace-threshold-range 1e-3 1e-2 1e-1
+```
+
+**Phase 3: Cross-Dataset Validation**
+```bash
+# Apply best configuration to other datasets
+uv run python scripts/param_search.py --datasets dermamnist organamnist bloodmnist \
+    --num-edit-layers-range 3 \
+    --max-edits-range 30 \
+    --projection-samples-range 500
+```
+
+### Multi-GPU Execution
+
+The parameter search supports parallel execution across multiple GPUs:
+
+```bash
+# Auto-detect and use all available GPUs
+uv run python scripts/param_search.py --parallel 0
+
+# Use specific number of GPUs
+uv run python scripts/param_search.py --parallel 4
+
+# Pin all experiments to specific GPU
+uv run python scripts/param_search.py --gpu 2
+```
+
+**Backward Compatibility:**
+- CPU-only: Works with `--parallel 1` (default)
+- Single GPU: Works automatically, or use `--gpu 0`
+- Multi-GPU: Use `--parallel 0` or `--parallel N`
+
+### Future Expandable Parameters
+
+The following parameters are currently fixed at default values but could be explored in future experiments:
+
+| Parameter | CLI Argument | Default | Potential Impact |
+|-----------|--------------|---------|------------------|
+| V Learning Rate | `--v-lr` | `0.1` | AlphaEdit target Z optimization quality |
+| V Gradient Steps | `--v-num-grad-steps` | `25` | More steps may improve precision |
+| L2 Regularization | `--L2` | `1e-4` | Edit magnitude vs stability tradeoff |
+| Head Learning Rate | `--head-lr` | `0.01` | HeadEditor optimization (head method only) |
+| Head Steps | `--head-steps` | `50` | HeadEditor convergence |
+| EWC Lambda | `--ewc-lambda` | `1000.0` | Forgetting prevention strength |
+| Batch Size | `--batch-size` | `32` | Memory vs speed tradeoff |
+| Training Epochs | `--epochs` | `10` | Base model quality |
+| FT-Train Ratio | `--ft-train-ratio` | `0.9` | Train/Discovery split balance |
+| Num Ablations | `--num-ablations` | `32` | ASTRA layer importance precision |
+
+These parameters affect various aspects of the pipeline but are less likely to significantly impact the core editing effectiveness compared to the primary search dimensions.
+
 ## Changelog
+
+### v1.7.0 (2026-01-26)
+- **Parameter Search System (v2)**: Complete rewrite of experiment scripts
+  - `scripts/param_search.py`: Now runs both edit AND eval stages for complete test set metrics
+  - `scripts/collect_results.py`: New script to aggregate metrics from completed experiments
+- **Multi-GPU Parallel Execution**: Run experiments in parallel across multiple GPUs
+  - `--parallel 0`: Auto-detect and use all available GPUs
+  - `--parallel N`: Use N parallel workers
+  - `--gpu N`: Pin all experiments to specific GPU
+- **Structured Output Naming**: Results organized as `{dataset}/proj{N}_edit{M}_{layer_mode}{L}_thresh{T}/`
+- **Extended Search Space**: New CLI arguments for param_search.py:
+  - `--datasets`: Search across multiple MedMNIST datasets
+  - `--projection-samples-range`: Search projection sample counts
+  - `--nullspace-threshold-range`: Search eigenvalue thresholds
+  - `--continue-from`: Resume from specific experiment
+- **Core Metrics Collection**: Standardized metrics extraction
+  - Edit performance: `edit_total_wrong`, `edit_num_fixed`, `edit_fix_ratio`
+  - Test performance: `test_acc_before`, `test_acc_after`, `test_acc_delta`, transition counts
+  - Projection stability: `proj_stability`, `proj_regression_rate`
+- **Documentation**: Added Parameter Search & Experiment Guide section in README
+  - Searchable parameters table
+  - Recommended coarse-to-fine search strategy
+  - Future expandable parameters table
 
 ### v1.6.0 (2026-01-21)
 - **Baseline Methods**: Added two baseline methods for comparison with AlphaEdit

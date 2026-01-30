@@ -454,7 +454,7 @@ def run_locate_stage(args, trainer=None, data_handler=None):
     locator.visualize_importance()
     
     top_layers = locator.get_top_layers(n=3)
-    print(f"\n✓ Layer localization complete!")
+    print("\n[OK] Layer localization complete!")
     print(f"  Top layers for editing: {top_layers}")
     
     return locator, misclassified
@@ -592,7 +592,7 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         editor.export_edit_log()
         editor.save_edited_model()
 
-        print(f"\n✓ Head editing complete!")
+        print("\n[OK] Head editing complete!")
         print(f"  Edited samples: {len(edit_indices)}")
 
     else:
@@ -668,7 +668,7 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         editor.export_edit_log()
         editor.save_edited_model()
 
-        print(f"\n✓ AlphaEdit complete!")
+        print("\n[OK] AlphaEdit complete!")
         print(f"  Edited samples: {len(edit_indices)}")
         print(f"  Edited layers: {edit_layers}")
 
@@ -1196,7 +1196,7 @@ def run_full_pipeline(args):
         )
         trainer.setup_model()
         trainer.load_checkpoint(filepath=checkpoint_path, load_optimizer=False)
-        print(f"✓ Loaded model with accuracy: {trainer.best_acc:.2f}%")
+        print(f"[OK] Loaded model with accuracy: {trainer.best_acc:.2f}%")
     else:
         trainer = run_train_stage(args, data_handler)
     
