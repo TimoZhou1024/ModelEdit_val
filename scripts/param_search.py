@@ -217,6 +217,27 @@ def parse_args():
         help="Timeout per experiment in seconds (default: 7200 = 2 hours)"
     )
 
+    # === Baseline Configuration ===
+    parser.add_argument(
+        "--no-baselines",
+        action="store_true",
+        help="Disable running baseline comparisons (baseline1: retrain, baseline2: finetune-errors)"
+    )
+
+    parser.add_argument(
+        "--baseline-epochs",
+        type=int,
+        default=10,
+        help="Number of training epochs for baselines (default: 10)"
+    )
+
+    parser.add_argument(
+        "--baseline-lr",
+        type=float,
+        default=1e-5,
+        help="Learning rate for baseline2 finetune-on-errors (default: 1e-5)"
+    )
+
     return parser.parse_args()
 
 
@@ -364,6 +385,152 @@ def parse_results(results_dir: Path) -> Dict[str, Any]:
     return results
 
 
+def get_unique_baseline_keys(configs: List[Dict[str, Any]]) -> List[Tuple[str, int]]:
+    """Extract unique (dataset, max_edits) pairs that need baselines."""
+    seen = set()
+    keys = []
+    for config in configs:
+        key = (config['dataset'], config['max_edits'])
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
+def build_baseline_run_name(dataset: str, max_edits: int, baseline_type: str) -> str:
+    """Build run name for a baseline experiment."""
+    name = "retrain" if baseline_type == "baseline1" else "finetune_errors"
+    return f"{dataset}/baseline_{name}_edit{max_edits}"
+
+
+def run_baseline_worker(
+    exp_idx: int,
+    dataset: str,
+    max_edits: int,
+    baseline_type: str,
+    args,
+    gpu_id: Optional[int] = None
+) -> Dict[str, Any]:
+    """Run a single baseline experiment (baseline1 or baseline2).
+
+    Returns an experiment record with the same structure as alphaedit experiments,
+    so baselines can appear as separate rows in the summary CSV.
+    """
+    run_name = build_baseline_run_name(dataset, max_edits, baseline_type)
+    method = "baseline_retrain" if baseline_type == "baseline1" else "baseline_finetune"
+
+    cmd = [
+        sys.executable,
+        str(SRC_DIR / "main.py"),
+        "--stage", baseline_type,
+        "--dataset", dataset,
+        "--run-name", run_name,
+        "--max-edits", str(max_edits),
+        "--baseline-epochs", str(args.baseline_epochs),
+        "--checkpoint-dir", args.checkpoints_dir,
+        "--log-dir", args.logs_dir,
+        "--results-dir", args.results_dir,
+    ]
+    if baseline_type == "baseline2":
+        cmd.extend(["--baseline-lr", str(args.baseline_lr)])
+
+    # Create config dict similar to alphaedit experiments (with baseline-specific fields)
+    config = {
+        'dataset': dataset,
+        'method': method,
+        'mode': 'baseline',
+        'num_edit_layers': None,
+        'edit_layers': None,
+        'projection_samples': None,
+        'nullspace_threshold': None,
+        'max_edits': max_edits,
+        'max_samples': None,
+        'baseline_epochs': args.baseline_epochs,
+        'baseline_lr': args.baseline_lr if baseline_type == "baseline2" else None,
+    }
+
+    record = {
+        'exp_idx': exp_idx,
+        'run_name': run_name,
+        'config': config,
+        'command_edit': ' '.join(cmd),
+        'command_eval': '',  # Baseline has single command
+        'status': 'pending',
+        'gpu_id': gpu_id,
+        'start_time': None,
+        'end_time': None,
+        'duration_seconds': None,
+        'edit_time_seconds': None,  # For baseline, this equals duration (training time)
+        'results': {},
+    }
+
+    if args.dry_run:
+        print(f"\n[DRY RUN] Baseline {exp_idx}: {run_name}")
+        print(f"  GPU: {gpu_id if gpu_id is not None else 'auto'}")
+        print(f"  Cmd: {' '.join(cmd)}")
+        record['status'] = 'skipped'
+        return record
+
+    env = os.environ.copy()
+    if gpu_id is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    bl_label = "RETRAIN" if baseline_type == "baseline1" else "FINETUNE-ERRORS"
+    print(f"\n{'='*70}")
+    print(f"BASELINE {exp_idx} ({bl_label}): {run_name}")
+    print(f"{'='*70}")
+    print(f"GPU: {gpu_id if gpu_id is not None else 'auto'}")
+
+    record['start_time'] = datetime.now().isoformat()
+    start = time.time()
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            timeout=args.timeout
+        )
+
+        if result.returncode != 0:
+            print(f"[ERROR] Baseline {baseline_type} failed (rc={result.returncode})")
+            print(f"STDERR (last 2000 chars): {result.stderr[-2000:]}")
+            record['status'] = 'failed'
+            record['error'] = result.stderr[-2000:]
+        else:
+            record['status'] = 'success'
+
+    except subprocess.TimeoutExpired:
+        record['status'] = 'timeout'
+        print(f"[ERROR] Baseline timed out ({args.timeout}s)")
+    except Exception as e:
+        record['status'] = 'error'
+        record['error'] = str(e)
+        print(f"[ERROR] Exception: {e}")
+
+    record['end_time'] = datetime.now().isoformat()
+    record['duration_seconds'] = time.time() - start
+    record['edit_time_seconds'] = record['duration_seconds']  # For baseline, training time = edit time
+
+    # Parse results
+    if record['status'] == 'success':
+        results_path = Path(args.results_dir) / run_name
+        if results_path.exists():
+            record['results'] = parse_results(results_path)
+            print("\nResults Summary:")
+            for key in ['edit_fix_rate', 'test_accuracy_delta', 'proj_stability']:
+                if key in record['results']:
+                    val = record['results'][key]
+                    if isinstance(val, float):
+                        print(f"  {key}: {val:.4f}")
+                    else:
+                        print(f"  {key}: {val}")
+
+    return record
+
+
 def run_experiment_worker(
     exp_idx: int,
     config: Dict[str, Any],
@@ -372,6 +539,9 @@ def run_experiment_worker(
 ) -> Dict[str, Any]:
     """Worker function to run a single experiment."""
     run_name = build_run_name(config)
+
+    # Add method field to config for CSV output
+    config['method'] = 'alphaedit'
 
     # Build commands
     cmd_edit, cmd_eval = build_commands(config, args, run_name)
@@ -388,6 +558,7 @@ def run_experiment_worker(
         'start_time': None,
         'end_time': None,
         'duration_seconds': None,
+        'edit_time_seconds': None,  # Time for edit stage only (excluding eval)
         'results': {},
     }
 
@@ -416,6 +587,7 @@ def run_experiment_worker(
     try:
         # Run edit stage
         print("\n--- Running EDIT stage ---")
+        edit_start = time.time()
         result_edit = subprocess.run(
             cmd_edit,
             capture_output=True,
@@ -424,6 +596,8 @@ def run_experiment_worker(
             env=env,
             timeout=args.timeout
         )
+        edit_end = time.time()
+        experiment['edit_time_seconds'] = edit_end - edit_start
 
         if result_edit.returncode != 0:
             print(f"[ERROR] Edit stage failed with return code {result_edit.returncode}")
@@ -431,6 +605,7 @@ def run_experiment_worker(
             experiment['status'] = 'failed_edit'
             experiment['error'] = result_edit.stderr[-2000:]
         else:
+            print(f"Edit stage completed in {experiment['edit_time_seconds']:.1f}s")
             # Run eval stage
             print("\n--- Running EVAL stage ---")
             result_eval = subprocess.run(
@@ -467,7 +642,7 @@ def run_experiment_worker(
         results_path = Path(args.results_dir) / run_name
         if results_path.exists():
             experiment['results'] = parse_results(results_path)
-            print(f"\nResults Summary:")
+            print("\nResults Summary:")
             # Print key metrics
             for key in ['edit_fix_rate', 'test_accuracy_delta', 'proj_stability']:
                 if key in experiment['results']:
@@ -493,7 +668,7 @@ def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
         result_keys.update(exp['results'].keys())
 
     # Build header
-    base_columns = ['exp_idx', 'run_name', 'status', 'duration_seconds', 'gpu_id']
+    base_columns = ['exp_idx', 'run_name', 'status', 'duration_seconds', 'edit_time_seconds', 'gpu_id']
     config_columns = sorted(config_keys)
     result_columns = sorted(result_keys)
     all_columns = base_columns + config_columns + result_columns
@@ -509,6 +684,7 @@ def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
                 'run_name': exp['run_name'],
                 'status': exp['status'],
                 'duration_seconds': exp.get('duration_seconds'),
+                'edit_time_seconds': exp.get('edit_time_seconds'),
                 'gpu_id': exp.get('gpu_id'),
             }
             # Add config values
@@ -575,6 +751,10 @@ def main():
         print(f"  --fixed-edit-layers: {args.fixed_edit_layers}")
     print(f"  --max-edits-range: {args.max_edits_range}")
     print(f"  --max-samples (fixed): {args.max_samples}")
+    print(f"  --no-baselines: {args.no_baselines}")
+    if not args.no_baselines:
+        print(f"  --baseline-epochs: {args.baseline_epochs}")
+        print(f"  --baseline-lr: {args.baseline_lr}")
 
     # Apply filters
     start_idx = args.continue_from
@@ -586,23 +766,58 @@ def main():
     configs_to_run = configs[start_idx:end_idx]
     print(f"\nRunning experiments {start_idx} to {end_idx - 1} ({len(configs_to_run)} experiments)")
 
-    # Run experiments
+    # === Phase 1: Run Baselines (deduplicated by dataset + max_edits) ===
+    # Baselines are added as separate rows in the experiments list
     experiments = []
+    next_exp_idx = 0  # Track experiment index for both baselines and alphaedit
+
+    if not args.no_baselines:
+        baseline_keys = get_unique_baseline_keys(configs_to_run)
+        total_baseline_runs = len(baseline_keys) * 2  # baseline1 + baseline2 for each key
+        print(f"\n{'='*70}")
+        print(f"PHASE 1: RUNNING BASELINES ({len(baseline_keys)} unique (dataset, max_edits) pairs, {total_baseline_runs} runs)")
+        print(f"{'='*70}")
+
+        for i, (dataset, max_edits) in enumerate(baseline_keys):
+            gpu_id = gpu_ids[0] if gpu_ids and gpu_ids[0] is not None else None
+
+            # Run baseline1 (retrain)
+            print(f"\n[{i+1}/{len(baseline_keys)}] Baseline for {dataset}, max_edits={max_edits}")
+            bl1 = run_baseline_worker(next_exp_idx, dataset, max_edits, "baseline1", args, gpu_id)
+            experiments.append(bl1)
+            next_exp_idx += 1
+
+            # Run baseline2 (finetune-errors)
+            bl2 = run_baseline_worker(next_exp_idx, dataset, max_edits, "baseline2", args, gpu_id)
+            experiments.append(bl2)
+            next_exp_idx += 1
+
+            # Save intermediate results after each baseline pair
+            summary_path = output_dir / f"param_search_summary_{args.datasets[0]}.csv"
+            save_summary_csv(experiments, summary_path)
+
+        print(f"\nBaseline phase complete: {len(experiments)} baseline runs")
+
+    # === Phase 2: Run AlphaEdit Experiments ===
+    print(f"\n{'='*70}")
+    print(f"PHASE 2: RUNNING ALPHAEDIT EXPERIMENTS ({len(configs_to_run)} experiments)")
+    print(f"{'='*70}")
 
     if parallel == 1:
         # Sequential execution
         for i, config in enumerate(configs_to_run):
-            exp_idx = start_idx + i
+            exp_idx = next_exp_idx + i
             gpu_id = gpu_ids[0] if gpu_ids and gpu_ids[0] is not None else None
             experiment = run_experiment_worker(exp_idx, config, args, gpu_id)
+
             experiments.append(experiment)
 
             # Save intermediate results
-            summary_path = output_dir / "param_search_summary.csv"
+            summary_path = output_dir / f"param_search_summary_{args.datasets[0]}.csv"
             save_summary_csv(experiments, summary_path)
 
             # Save detailed JSON
-            json_path = output_dir / "param_search_details.json"
+            json_path = output_dir / f"param_search_details_{args.datasets[0]}.json"
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(experiments, f, indent=2)
 
@@ -611,18 +826,19 @@ def main():
         with ProcessPoolExecutor(max_workers=parallel) as executor:
             futures = {}
             for i, config in enumerate(configs_to_run):
-                exp_idx = start_idx + i
+                exp_idx = next_exp_idx + i
                 # Round-robin GPU assignment
                 gpu_id = gpu_ids[i % len(gpu_ids)] if gpu_ids else None
                 future = executor.submit(
                     run_experiment_worker, exp_idx, config, args, gpu_id
                 )
-                futures[future] = exp_idx
+                futures[future] = (exp_idx, i)  # Store both exp_idx and config index
 
             for future in as_completed(futures):
-                exp_idx = futures[future]
+                exp_idx, config_idx = futures[future]
                 try:
                     experiment = future.result()
+
                     experiments.append(experiment)
                 except Exception as e:
                     print(f"[ERROR] Experiment {exp_idx} raised exception: {e}")
@@ -630,16 +846,16 @@ def main():
                         'exp_idx': exp_idx,
                         'status': 'exception',
                         'error': str(e),
-                        'config': configs_to_run[exp_idx - start_idx],
+                        'config': configs_to_run[config_idx],
                         'results': {}
                     })
 
                 # Save intermediate results
                 experiments_sorted = sorted(experiments, key=lambda x: x['exp_idx'])
-                summary_path = output_dir / "param_search_summary.csv"
+                summary_path = output_dir / f"param_search_summary_{args.datasets[0]}.csv"
                 save_summary_csv(experiments_sorted, summary_path)
 
-                json_path = output_dir / "param_search_details.json"
+                json_path = output_dir / f"param_search_details_{args.datasets[0]}.json"
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(experiments_sorted, f, indent=2)
 
@@ -678,8 +894,8 @@ def main():
                     print(f"  {key}: {best_exp['results'][key] * 100:.1f}%")
 
     print(f"\nResults saved to: {output_dir}")
-    print(f"  Summary CSV: {output_dir}/param_search_summary.csv")
-    print(f"  Details JSON: {output_dir}/param_search_details.json")
+    print(f"  Summary CSV: {output_dir}/param_search_summary_{args.datasets[0]}.csv")
+    print(f"  Details JSON: {output_dir}/param_search_details_{args.datasets[0]}.json")
 
 
 if __name__ == "__main__":

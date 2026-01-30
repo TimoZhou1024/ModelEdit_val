@@ -93,10 +93,12 @@ def parse_run_name(run_name: str) -> Dict[str, Any]:
     Parse structured run name to extract configuration parameters.
 
     Expected formats:
-        {dataset}/proj{N}_edit{M}_astra{L}_thresh{T}
-        {dataset}/proj{N}_edit{M}_fixed{L1-L2-L3}_thresh{T}
+        {dataset}/proj{N}_edit{M}_astra{L}_thresh{T}          -> AlphaEdit (astra)
+        {dataset}/proj{N}_edit{M}_fixed{L1-L2-L3}_thresh{T}   -> AlphaEdit (fixed)
+        {dataset}/baseline_retrain_edit{M}                     -> Baseline1 (retrain)
+        {dataset}/baseline_finetune_errors_edit{M}             -> Baseline2 (finetune)
 
-    Returns dict with: dataset, mode, projection_samples, max_edits,
+    Returns dict with: dataset, method, mode, projection_samples, max_edits,
                        num_edit_layers or edit_layers, nullspace_threshold
     """
     config = {}
@@ -110,6 +112,33 @@ def parse_run_name(run_name: str) -> Dict[str, Any]:
         # Legacy format or flat structure
         config['dataset'] = 'unknown'
         config_str = run_name
+
+    # Check for baseline patterns first
+    baseline_retrain = re.search(r'baseline_retrain_edit(\d+)', config_str)
+    baseline_finetune = re.search(r'baseline_finetune_errors_edit(\d+)', config_str)
+
+    if baseline_retrain:
+        config['method'] = 'baseline_retrain'
+        config['mode'] = 'baseline'
+        config['max_edits'] = int(baseline_retrain.group(1))
+        config['num_edit_layers'] = None
+        config['edit_layers'] = None
+        config['projection_samples'] = None
+        config['nullspace_threshold'] = None
+        return config
+
+    if baseline_finetune:
+        config['method'] = 'baseline_finetune'
+        config['mode'] = 'baseline'
+        config['max_edits'] = int(baseline_finetune.group(1))
+        config['num_edit_layers'] = None
+        config['edit_layers'] = None
+        config['projection_samples'] = None
+        config['nullspace_threshold'] = None
+        return config
+
+    # AlphaEdit experiment
+    config['method'] = 'alphaedit'
 
     # Parse projection samples
     proj_match = re.search(r'proj(\d+)', config_str)
@@ -236,7 +265,11 @@ def find_experiment_dirs(results_dir: Path, datasets: Optional[List[str]] = None
     """
     Find all experiment directories containing evaluation results.
 
-    Handles both structured (dataset/config/) and flat (config/) layouts.
+    Handles:
+    - Structured AlphaEdit: results/{dataset}/proj{N}_edit{M}_astra{L}_thresh{T}/
+    - Baseline: results/{dataset}/baseline_retrain_edit{M}/
+    - Baseline: results/{dataset}/baseline_finetune_errors_edit{M}/
+    - Flat layout: results/{config}/
     """
     experiment_dirs = []
 
@@ -257,7 +290,15 @@ def find_experiment_dirs(results_dir: Path, datasets: Optional[List[str]] = None
                 continue
 
             # Check if this directory has evaluation CSVs
-            if (config_dir / "comparative_evaluation_edit_samples.csv").exists():
+            # AlphaEdit uses comparative_evaluation_edit_samples.csv
+            # Baselines use baseline_*_summary.csv
+            has_alphaedit = (config_dir / "comparative_evaluation_edit_samples.csv").exists()
+            has_baseline = any(
+                f.name.startswith("baseline_") and f.name.endswith("_summary.csv")
+                for f in config_dir.iterdir() if f.is_file()
+            )
+
+            if has_alphaedit or has_baseline:
                 experiment_dirs.append(config_dir)
 
     # Also check for flat layout: results/{config}/
@@ -269,7 +310,13 @@ def find_experiment_dirs(results_dir: Path, datasets: Optional[List[str]] = None
         if any((config_dir / d).is_dir() for d in config_dir.iterdir() if d.is_dir()):
             continue
 
-        if (config_dir / "comparative_evaluation_edit_samples.csv").exists():
+        has_alphaedit = (config_dir / "comparative_evaluation_edit_samples.csv").exists()
+        has_baseline = any(
+            f.name.startswith("baseline_") and f.name.endswith("_summary.csv")
+            for f in config_dir.iterdir() if f.is_file()
+        )
+
+        if has_alphaedit or has_baseline:
             experiment_dirs.append(config_dir)
 
     return experiment_dirs
@@ -334,7 +381,7 @@ def main():
 
     # Define output columns (ordered)
     config_columns = [
-        'run_name', 'dataset', 'mode', 'num_edit_layers', 'edit_layers',
+        'run_name', 'dataset', 'method', 'mode', 'num_edit_layers', 'edit_layers',
         'projection_samples', 'nullspace_threshold', 'max_edits'
     ]
 

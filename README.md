@@ -548,23 +548,53 @@ uv run python scripts/collect_results.py --results-dir results
 | Timeout | `--timeout` | `7200` | Per-experiment timeout in seconds |
 | Dry Run | `--dry-run` | False | Preview commands without executing |
 
+### Baseline Comparison
+
+Each AlphaEdit experiment can be automatically compared with two baseline methods:
+
+| Parameter | CLI Argument | Default | Description |
+|-----------|--------------|---------|-------------|
+| Disable Baselines | `--no-baselines` | False | Skip baseline comparisons |
+| Baseline Epochs | `--baseline-epochs` | `10` | Training epochs for baselines |
+| Baseline LR | `--baseline-lr` | `1e-5` | Learning rate for baseline2 (finetune-errors) |
+
+**Baseline Methods:**
+- **Baseline 1 (Retrain)**: Add error samples to FT-Train, train new model from scratch
+- **Baseline 2 (Finetune-Errors)**: Continue finetuning existing model on error samples only
+
+**Deduplication:** Baselines only depend on `(dataset, max_edits)`, so they run once per unique combination regardless of projection_samples, nullspace_threshold, or layer configuration.
+
 ### Output Structure
 
 ```
 param_search_results/
-├── param_search_summary.csv      # All experiments with metrics
-└── param_search_details.json     # Detailed experiment records
+├── param_search_summary_{dataset}.csv   # All experiments (baselines + alphaedit) as separate rows
+└── param_search_details_{dataset}.json  # Detailed experiment records
 
-results/{dataset}/proj{N}_edit{M}_{layer_mode}{L}_thresh{T}/
-├── comparative_evaluation_edit_samples.csv
-├── comparative_evaluation_projection_samples.csv
-├── comparative_evaluation_test_set.csv
-└── comparative_evaluation_edit_discovery_set.csv
+results/{dataset}/
+├── proj{N}_edit{M}_{layer_mode}{L}_thresh{T}/   # AlphaEdit experiments
+│   ├── comparative_evaluation_edit_samples.csv
+│   ├── comparative_evaluation_projection_samples.csv
+│   ├── comparative_evaluation_test_set.csv
+│   └── comparative_evaluation_edit_discovery_set.csv
+├── baseline_retrain_edit{M}/                     # Baseline 1 results
+│   └── baseline_retrain_summary.csv
+└── baseline_finetune_errors_edit{M}/             # Baseline 2 results
+    └── baseline_finetune_errors_summary.csv
 ```
+
+**CSV Structure:** Each experiment (baseline or alphaedit) occupies its own row with a `method` column:
+- `baseline_retrain`: Baseline 1 (retrain from scratch)
+- `baseline_finetune`: Baseline 2 (finetune on errors)
+- `alphaedit`: AlphaEdit experiments
 
 ### Core Metrics
 
 The parameter search collects these key metrics for each experiment:
+
+**Timing:**
+- `edit_time_seconds`: Time for edit/training stage only (excludes eval and error sample selection)
+- `duration_seconds`: Total time including all stages
 
 **Edit Performance** (on error samples used for editing):
 - `edit_total_wrong`: Total error samples edited
@@ -654,10 +684,15 @@ These parameters affect various aspects of the pipeline but are less likely to s
 
 ## Changelog
 
-### v1.7.0 (2026-01-26)
+### v1.7.0 (2026-01-31)
 - **Parameter Search System (v2)**: Complete rewrite of experiment scripts
   - `scripts/param_search.py`: Now runs both edit AND eval stages for complete test set metrics
   - `scripts/collect_results.py`: New script to aggregate metrics from completed experiments
+- **Automatic Baseline Comparison**: Each experiment automatically runs baseline comparisons
+  - Baseline 1 (retrain) and Baseline 2 (finetune-errors) run once per unique (dataset, max_edits)
+  - Baselines appear as **separate rows** in summary CSV with `method` column (`baseline_retrain`, `baseline_finetune`, `alphaedit`)
+  - `--no-baselines`: Skip baseline comparisons for faster iteration
+  - `--baseline-epochs`, `--baseline-lr`: Configure baseline training
 - **Multi-GPU Parallel Execution**: Run experiments in parallel across multiple GPUs
   - `--parallel 0`: Auto-detect and use all available GPUs
   - `--parallel N`: Use N parallel workers
@@ -669,6 +704,7 @@ These parameters affect various aspects of the pipeline but are less likely to s
   - `--nullspace-threshold-range`: Search eigenvalue thresholds
   - `--continue-from`: Resume from specific experiment
 - **Core Metrics Collection**: Standardized metrics extraction
+  - Timing: `edit_time_seconds` (edit/training stage only, excludes eval and sample selection)
   - Edit performance: `edit_total_wrong`, `edit_num_fixed`, `edit_fix_ratio`
   - Test performance: `test_acc_before`, `test_acc_after`, `test_acc_delta`, transition counts
   - Projection stability: `proj_stability`, `proj_regression_rate`
