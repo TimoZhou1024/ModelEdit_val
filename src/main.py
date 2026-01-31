@@ -16,6 +16,9 @@ Supported Datasets:
 - organamnist: Abdominal CT (11 classes, Grayscale)
 - bloodmnist: Blood Cell Microscopy (8 classes, RGB)
 - tissuemnist: Kidney Cortex Microscopy (8 classes, Grayscale)
+- liver4: Liver Fibrosis Staging (4 classes, Grayscale) - F0/F1/F2/F3-F4
+- liver2s: Liver Fibrosis Binary (2 classes) - Significant fibrosis (F0-F2 vs F3-F4)
+- liver2a: Liver Fibrosis Binary (2 classes) - Any fibrosis (F0 vs F1-F4)
 """
 
 import argparse
@@ -44,7 +47,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from data_handler import DataHandler, MedMNISTDataset, MEDMNIST_INFO
+from data_handler import MEDMNIST_INFO, get_data_handler
 from trainer import Trainer
 from locator import Locator
 from editor import Editor, AlphaEditHyperParams, HeadEditor, HeadEditHyperParams
@@ -291,7 +294,7 @@ def run_data_stage(args):
     print(f"STAGE 1: DATA PREPARATION (4-Set Protocol) - {args.dataset.upper()}")
     print("=" * 70)
 
-    handler = DataHandler(
+    handler = get_data_handler(
         dataset_name=args.dataset,
         data_path=args.data_path,
         ft_train_ratio=args.ft_train_ratio,
@@ -323,7 +326,7 @@ def run_train_stage(args, data_handler=None):
 
     # Get data handler
     if data_handler is None:
-        data_handler = DataHandler(
+        data_handler = get_data_handler(
             dataset_name=args.dataset,
             data_path=args.data_path,
             ft_train_ratio=args.ft_train_ratio,
@@ -386,7 +389,7 @@ def run_locate_stage(args, trainer=None, data_handler=None):
 
     # Get data handler
     if data_handler is None:
-        data_handler = DataHandler(
+        data_handler = get_data_handler(
             dataset_name=args.dataset,
             data_path=args.data_path,
             ft_train_ratio=args.ft_train_ratio,
@@ -471,7 +474,7 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
 
     # Get data handler
     if data_handler is None:
-        data_handler = DataHandler(
+        data_handler = get_data_handler(
             dataset_name=args.dataset,
             data_path=args.data_path,
             ft_train_ratio=args.ft_train_ratio,
@@ -751,7 +754,7 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
 
     # Get data handler
     if data_handler is None:
-        data_handler = DataHandler(
+        data_handler = get_data_handler(
             dataset_name=args.dataset,
             data_path=args.data_path,
             ft_train_ratio=args.ft_train_ratio,
@@ -896,7 +899,7 @@ def run_baseline1_stage(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Initialize data handler
-    data_handler = DataHandler(
+    data_handler = get_data_handler(
         dataset_name=args.dataset,
         data_path=args.data_path,
         ft_train_ratio=args.ft_train_ratio,
@@ -1040,7 +1043,7 @@ def run_baseline2_stage(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Initialize data handler
-    data_handler = DataHandler(
+    data_handler = get_data_handler(
         dataset_name=args.dataset,
         data_path=args.data_path,
         ft_train_ratio=args.ft_train_ratio,

@@ -20,16 +20,20 @@ Supported Datasets:
 - organamnist: Abdominal CT (11 classes, Grayscale) - Shape-based
 - bloodmnist: Blood Cell Microscopy (8 classes, RGB)
 - tissuemnist: Kidney Cortex Microscopy (8 classes, Grayscale)
+- liver4: Liver Fibrosis Staging (4 classes, Grayscale) - F0/F1/F2/F3-F4
+- liver2s: Liver Fibrosis Binary (2 classes) - Significant fibrosis (F0-F2 vs F3-F4)
+- liver2a: Liver Fibrosis Binary (2 classes) - Any fibrosis (F0 vs F1-F4)
 """
 
 import os
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any, Optional, Union
 from torch.utils.data import Dataset, DataLoader, Subset
 import torch
 from PIL import Image
+from sklearn.model_selection import train_test_split
 
 
 # ============================================================================
@@ -101,6 +105,39 @@ MEDMNIST_INFO = {
             "Collecting Duct", "Distal Convoluted Tubule", "Glomerular Endothelial",
             "Interstitial", "Leukocytes", "Podocytes", "Proximal Tubule", "Thick Ascending Limb"
         ]
+    },
+    # ========================================================================
+    # Liver Fibrosis Datasets (Custom format - MERIT paper)
+    # ========================================================================
+    "liver4": {
+        "n_channels": 1,  # Grayscale ultrasound
+        "n_classes": 4,
+        "data_file": "dataset/",  # Directory containing imgs.npy, labs.npy
+        "task": "multi-class",
+        "description": "Liver Fibrosis Staging - 4 classes (F0, F1, F2, F3-F4)",
+        "class_names": ["F0", "F1", "F2", "F3-F4"],
+        "label_mapping": None,  # No remapping, use original labels
+        "is_liver_dataset": True
+    },
+    "liver2s": {
+        "n_channels": 1,
+        "n_classes": 2,
+        "data_file": "dataset/",
+        "task": "binary",
+        "description": "Liver Fibrosis - Significant (F0-F2 vs F3-F4)",
+        "class_names": ["No Significant Fibrosis (F0-F2)", "Significant Fibrosis (F3-F4)"],
+        "label_mapping": {0: 0, 1: 0, 2: 0, 3: 1},  # F0,F1,F2 -> 0; F3-F4 -> 1
+        "is_liver_dataset": True
+    },
+    "liver2a": {
+        "n_channels": 1,
+        "n_classes": 2,
+        "data_file": "dataset/",
+        "task": "binary",
+        "description": "Liver Fibrosis - Any (F0 vs F1-F4)",
+        "class_names": ["No Fibrosis (F0)", "Any Fibrosis (F1-F4)"],
+        "label_mapping": {0: 0, 1: 1, 2: 1, 3: 1},  # F0 -> 0; F1,F2,F3-F4 -> 1
+        "is_liver_dataset": True
     }
 }
 
@@ -180,6 +217,79 @@ class MedMNISTDataset(Dataset):
 
 # Legacy alias for backward compatibility
 PathMNISTDataset = MedMNISTDataset
+
+
+class LiverFibrosisDataset(Dataset):
+    """
+    Dataset for liver fibrosis data stored in special format.
+    Handles float32 normalized images and optional label remapping for binary tasks.
+
+    The original images are z-score normalized floats, which are converted to
+    uint8 [0, 255] for PIL compatibility and standard transform pipeline.
+    """
+
+    def __init__(
+        self,
+        images: np.ndarray,
+        labels: np.ndarray,
+        transform=None,
+        indices: np.ndarray = None,
+        label_mapping: dict = None,
+        class_names: list = None
+    ):
+        """
+        Args:
+            images: numpy array of shape (N, H, W, C), float32 z-score normalized
+            labels: numpy array of shape (N,) with original labels (0-3)
+            transform: optional transforms to apply
+            indices: optional indices to subset the data
+            label_mapping: optional dict to remap labels (e.g., {0:0, 1:0, 2:0, 3:1} for binary)
+            class_names: list of class names for this dataset
+        """
+        self.images = images
+        self.original_labels = labels.flatten()
+        self.transform = transform
+        self.indices = indices if indices is not None else np.arange(len(images))
+        self.label_mapping = label_mapping
+        self.class_names = class_names or []
+        self.n_channels = 1  # Liver fibrosis images are grayscale
+
+        # Apply label mapping if provided
+        if self.label_mapping is not None:
+            self.labels = np.array([self.label_mapping[lbl] for lbl in self.original_labels])
+        else:
+            self.labels = self.original_labels
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+        real_idx = self.indices[idx]
+        image = self.images[real_idx]  # Shape: (256, 256, 1), float32
+        label = int(self.labels[real_idx])
+
+        # Convert z-score normalized float to uint8 [0, 255]
+        # Use min-max normalization per image for consistent contrast
+        image_2d = image.squeeze()  # (256, 256)
+        img_min, img_max = image_2d.min(), image_2d.max()
+        if img_max > img_min:
+            image_normalized = (image_2d - img_min) / (img_max - img_min)
+        else:
+            image_normalized = np.zeros_like(image_2d)
+        image_uint8 = (image_normalized * 255).astype(np.uint8)
+
+        # Convert to PIL Image (grayscale)
+        image_pil = Image.fromarray(image_uint8, mode='L')
+
+        if self.transform:
+            image = self.transform(image_pil)
+        else:
+            # Default: convert to tensor and normalize to [0, 1]
+            image = np.array(image_pil)
+            image = np.stack([image] * 3, axis=-1)  # Grayscale -> RGB
+            image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+
+        return image, label
 
 
 class DataHandler:
@@ -753,6 +863,411 @@ class DataHandler:
             'train': ft_train_loader,
             'held_out': discovery_loader
         }
+
+
+# ============================================================================
+# Liver Fibrosis DataHandler (Custom dataset with no predefined splits)
+# ============================================================================
+
+class LiverFibrosisDataHandler(DataHandler):
+    """
+    DataHandler for liver fibrosis dataset stored in custom .npy format.
+
+    Key differences from standard DataHandler:
+    1. Data stored as .npy files (imgs.npy, labs.npy) instead of .npz
+    2. Images are float32 z-score normalized (not uint8)
+    3. No predefined train/val/test splits - creates stratified splits from scratch
+    4. Supports label remapping for binary classification modes
+
+    Split Strategy - Aligned with MERIT paper (reference/MERIT/dataset.py):
+    When cross_val=False, MERIT uses fixed 60/20/20 split:
+    - 60% -> Train (then 90/10 -> FT-Train/Edit-Discovery)
+    - 20% -> Validation (early stopping)
+    - 20% -> Test (final evaluation)
+
+    This matches MERIT's non-cross-validation mode exactly.
+    """
+
+    # Split ratios aligned with MERIT's non-CV mode (cross_val=False)
+    # See reference/MERIT/dataset.py lines 46-65
+    TRAIN_RATIO = 0.60  # 60% -> Official Train
+    VAL_RATIO = 0.20    # 20% -> FT-Val
+    TEST_RATIO = 0.20   # 20% -> Test Set
+
+    def __init__(
+        self,
+        dataset_name: str = "liver4",
+        data_path: str = None,
+        ft_train_ratio: float = 0.9,
+        random_seed: int = 42,
+        log_dir: str = "logs"
+    ):
+        """
+        Args:
+            dataset_name: liver4, liver2s, or liver2a
+            data_path: Path to directory containing imgs.npy and labs.npy
+            ft_train_ratio: Fraction of train set for FT-Train (default: 0.9)
+            random_seed: Random seed for reproducible splitting
+            log_dir: Directory to save split information
+        """
+        # Get dataset metadata
+        self.dataset_name = dataset_name.lower()
+        self.dataset_info = get_dataset_info(self.dataset_name)
+        self.n_classes = self.dataset_info["n_classes"]
+        self.n_channels = self.dataset_info["n_channels"]
+        self.class_names = self.dataset_info["class_names"]
+        self.label_mapping = self.dataset_info.get("label_mapping", None)
+
+        # Resolve data path
+        if data_path is None:
+            data_path = self.dataset_info["data_file"]
+
+        self.data_path = Path(data_path)
+        self.ft_train_ratio = ft_train_ratio
+        self.random_seed = random_seed
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Data containers
+        self.all_images = None    # All 703 images
+        self.all_labels = None    # All 703 labels (original)
+        self.train_images = None  # "Official train" images (70%)
+        self.train_labels = None  # "Official train" labels
+        self.val_images = None    # FT-Val images (15%)
+        self.val_labels = None    # FT-Val labels
+        self.test_images = None   # Test Set images (15%)
+        self.test_labels = None   # Test Set labels
+
+        # Split indices
+        self.train_split_indices = None    # Indices into all_images for train
+        self.val_split_indices = None      # Indices into all_images for val
+        self.test_split_indices = None     # Indices into all_images for test
+        self.ft_train_indices = None       # Indices into train_images for FT-Train
+        self.discovery_indices = None      # Indices into train_images for Discovery
+
+        # Legacy aliases
+        self.train_indices = None
+        self.held_out_indices = None
+
+        # Split indices file path
+        self.split_indices_path = self.log_dir / f"{self.dataset_name}_split_indices.pt"
+
+        # Statistics
+        self.split_info = {}
+
+        print(f"LiverFibrosisDataHandler initialized for: {self.dataset_name}")
+        print(f"  Classes: {self.n_classes}")
+        print(f"  Channels: {self.n_channels} (Grayscale)")
+        print(f"  Description: {self.dataset_info['description']}")
+        if self.label_mapping:
+            print(f"  Label mapping: {self.label_mapping}")
+
+    def load_data(self) -> Dict[str, np.ndarray]:
+        """Load liver fibrosis data from .npy files and create train/val/test splits."""
+        imgs_path = self.data_path / "imgs.npy"
+        labs_path = self.data_path / "labs.npy"
+
+        if not imgs_path.exists() or not labs_path.exists():
+            raise FileNotFoundError(
+                f"Liver fibrosis data not found at {self.data_path}. "
+                f"Expected files: imgs.npy, labs.npy"
+            )
+
+        print(f"Loading {self.dataset_name} from {self.data_path}...")
+
+        # Load raw data (imgs is array of dicts, labs is array of ints)
+        imgs_raw = np.load(imgs_path, allow_pickle=True)
+        labs_raw = np.load(labs_path, allow_pickle=True)
+
+        # Extract image arrays from dict format {'4': array}
+        images_list = []
+        for img_dict in imgs_raw:
+            # Each img_dict is like {'4': np.ndarray of shape (256, 256, 1)}
+            img_array = list(img_dict.values())[0]
+            images_list.append(img_array)
+
+        self.all_images = np.array(images_list, dtype=np.float32)  # (703, 256, 256, 1)
+        self.all_labels = labs_raw.astype(np.int64)  # (703,)
+
+        print(f"  Total samples: {len(self.all_images)}")
+        print(f"  Image shape: {self.all_images[0].shape}")
+        print(f"  Label distribution (original): {dict(zip(*np.unique(self.all_labels, return_counts=True)))}")
+
+        # Create stratified train/val/test split
+        self._create_initial_splits()
+
+        return {
+            'train_images': self.train_images,
+            'train_labels': self.train_labels,
+            'val_images': self.val_images,
+            'val_labels': self.val_labels,
+            'test_images': self.test_images,
+            'test_labels': self.test_labels
+        }
+
+    def _create_initial_splits(self):
+        """Create stratified train/val/test splits from all data."""
+        n_total = len(self.all_images)
+        all_indices = np.arange(n_total)
+
+        # First split: train vs (val+test)
+        train_idx, val_test_idx = train_test_split(
+            all_indices,
+            test_size=(self.VAL_RATIO + self.TEST_RATIO),
+            random_state=self.random_seed,
+            stratify=self.all_labels
+        )
+
+        # Second split: val vs test
+        # Calculate relative test size within val_test portion
+        relative_test_size = self.TEST_RATIO / (self.VAL_RATIO + self.TEST_RATIO)
+        val_idx, test_idx = train_test_split(
+            val_test_idx,
+            test_size=relative_test_size,
+            random_state=self.random_seed,
+            stratify=self.all_labels[val_test_idx]
+        )
+
+        # Store split indices
+        self.train_split_indices = train_idx
+        self.val_split_indices = val_idx
+        self.test_split_indices = test_idx
+
+        # Create split datasets
+        self.train_images = self.all_images[train_idx]
+        self.train_labels = self.all_labels[train_idx]
+        self.val_images = self.all_images[val_idx]
+        self.val_labels = self.all_labels[val_idx]
+        self.test_images = self.all_images[test_idx]
+        self.test_labels = self.all_labels[test_idx]
+
+        print(f"  Created stratified splits:")
+        print(f"    Train: {len(train_idx)} ({100*len(train_idx)/n_total:.1f}%)")
+        print(f"    Val: {len(val_idx)} ({100*len(val_idx)/n_total:.1f}%)")
+        print(f"    Test: {len(test_idx)} ({100*len(test_idx)/n_total:.1f}%)")
+
+    def _save_split_indices(self) -> str:
+        """Save all split indices to file for reproducibility."""
+        torch.save({
+            'dataset_name': self.dataset_name,
+            'train_split_indices': self.train_split_indices,
+            'val_split_indices': self.val_split_indices,
+            'test_split_indices': self.test_split_indices,
+            'ft_train_indices': self.ft_train_indices,
+            'discovery_indices': self.discovery_indices,
+            'ft_train_ratio': self.ft_train_ratio,
+            'random_seed': self.random_seed
+        }, self.split_indices_path)
+        print(f"  Split indices saved to: {self.split_indices_path}")
+        return str(self.split_indices_path)
+
+    def _load_split_indices(self) -> bool:
+        """Load split indices from file if exists and matches config."""
+        if not self.split_indices_path.exists():
+            return False
+
+        saved = torch.load(self.split_indices_path, weights_only=False)
+
+        # Verify config matches
+        if (saved.get('dataset_name') != self.dataset_name or
+            saved.get('ft_train_ratio') != self.ft_train_ratio or
+            saved.get('random_seed') != self.random_seed):
+            print(f"  Warning: Saved split config differs. Regenerating...")
+            return False
+
+        # Load all indices
+        self.train_split_indices = saved['train_split_indices']
+        self.val_split_indices = saved['val_split_indices']
+        self.test_split_indices = saved['test_split_indices']
+        self.ft_train_indices = saved['ft_train_indices']
+        self.discovery_indices = saved['discovery_indices']
+
+        # Legacy aliases
+        self.train_indices = self.ft_train_indices
+        self.held_out_indices = self.discovery_indices
+
+        print(f"  Loaded existing split from: {self.split_indices_path}")
+        return True
+
+    def create_resplit(self, force: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Create 90/10 FT-Train/Edit-Discovery split on the train portion.
+
+        This is called AFTER load_data() has created train/val/test splits.
+        """
+        if self.train_images is None:
+            self.load_data()
+
+        # Try to load existing split
+        if not force and self._load_split_indices():
+            # Recreate image splits from loaded indices
+            self.train_images = self.all_images[self.train_split_indices]
+            self.train_labels = self.all_labels[self.train_split_indices]
+            self.val_images = self.all_images[self.val_split_indices]
+            self.val_labels = self.all_labels[self.val_split_indices]
+            self.test_images = self.all_images[self.test_split_indices]
+            self.test_labels = self.all_labels[self.test_split_indices]
+
+            n_ft_train = len(self.ft_train_indices)
+            n_discovery = len(self.discovery_indices)
+            print(f"\n=== Re-split Protocol (Loaded) ===")
+            print(f"  FT-Train: {n_ft_train} samples")
+            print(f"  Edit-Discovery: {n_discovery} samples")
+            return self.ft_train_indices, self.discovery_indices
+
+        # Create new 90/10 split within train set
+        n_train = len(self.train_images)
+        n_ft_train = int(n_train * self.ft_train_ratio)
+
+        np.random.seed(self.random_seed)
+        all_train_indices = np.arange(n_train)
+        np.random.shuffle(all_train_indices)
+
+        self.ft_train_indices = all_train_indices[:n_ft_train]
+        self.discovery_indices = all_train_indices[n_ft_train:]
+
+        # Legacy aliases
+        self.train_indices = self.ft_train_indices
+        self.held_out_indices = self.discovery_indices
+
+        print(f"\n=== Re-split Protocol (4-Set Strategy) ===")
+        print(f"  Source: Train Set ({n_train} samples)")
+        print(f"  ├─ FT-Train: {n_ft_train} ({100*self.ft_train_ratio:.0f}%)")
+        print(f"  └─ Edit-Discovery: {len(self.discovery_indices)} ({100*(1-self.ft_train_ratio):.0f}%)")
+
+        # Record split info
+        self.split_info = {
+            'total_samples': len(self.all_images),
+            'train_samples': n_train,
+            'ft_train_samples': n_ft_train,
+            'discovery_samples': len(self.discovery_indices),
+            'val_samples': len(self.val_images),
+            'test_samples': len(self.test_images)
+        }
+
+        # Save indices
+        self._save_split_indices()
+
+        return self.ft_train_indices, self.discovery_indices
+
+    def get_ft_train_dataset(self, transform=None) -> LiverFibrosisDataset:
+        """Get FT-Train dataset using LiverFibrosisDataset class."""
+        if self.ft_train_indices is None:
+            self.create_resplit()
+
+        return LiverFibrosisDataset(
+            images=self.train_images,
+            labels=self.train_labels,
+            transform=transform,
+            indices=self.ft_train_indices,
+            label_mapping=self.label_mapping,
+            class_names=self.class_names
+        )
+
+    def get_discovery_dataset(self, transform=None) -> LiverFibrosisDataset:
+        """Get Edit-Discovery dataset using LiverFibrosisDataset class."""
+        if self.discovery_indices is None:
+            self.create_resplit()
+
+        return LiverFibrosisDataset(
+            images=self.train_images,
+            labels=self.train_labels,
+            transform=transform,
+            indices=self.discovery_indices,
+            label_mapping=self.label_mapping,
+            class_names=self.class_names
+        )
+
+    def get_val_dataset(self, transform=None) -> LiverFibrosisDataset:
+        """Get FT-Val dataset using LiverFibrosisDataset class."""
+        return LiverFibrosisDataset(
+            images=self.val_images,
+            labels=self.val_labels,
+            transform=transform,
+            label_mapping=self.label_mapping,
+            class_names=self.class_names
+        )
+
+    def get_test_dataset(self, transform=None) -> LiverFibrosisDataset:
+        """Get Test Set using LiverFibrosisDataset class."""
+        return LiverFibrosisDataset(
+            images=self.test_images,
+            labels=self.test_labels,
+            transform=transform,
+            label_mapping=self.label_mapping,
+            class_names=self.class_names
+        )
+
+    def get_combined_ft_train_with_errors(
+        self,
+        error_indices: np.ndarray,
+        transform=None
+    ) -> LiverFibrosisDataset:
+        """Create combined FT-Train + Error samples dataset."""
+        if self.ft_train_indices is None:
+            self.create_resplit()
+
+        combined_indices = np.concatenate([
+            self.ft_train_indices,
+            self.discovery_indices[error_indices]
+        ])
+
+        print(f"  Combined dataset: FT-Train ({len(self.ft_train_indices)}) + "
+              f"Errors ({len(error_indices)}) = {len(combined_indices)} samples")
+
+        return LiverFibrosisDataset(
+            images=self.train_images,
+            labels=self.train_labels,
+            transform=transform,
+            indices=combined_indices,
+            label_mapping=self.label_mapping,
+            class_names=self.class_names
+        )
+
+    def get_error_samples_dataset(
+        self,
+        error_indices: np.ndarray,
+        transform=None
+    ) -> LiverFibrosisDataset:
+        """Get only error samples from Edit-Discovery set."""
+        if self.discovery_indices is None:
+            self.create_resplit()
+
+        error_original_indices = self.discovery_indices[error_indices]
+        print(f"  Error samples dataset: {len(error_original_indices)} samples")
+
+        return LiverFibrosisDataset(
+            images=self.train_images,
+            labels=self.train_labels,
+            transform=transform,
+            indices=error_original_indices,
+            label_mapping=self.label_mapping,
+            class_names=self.class_names
+        )
+
+
+# ============================================================================
+# Factory Function
+# ============================================================================
+
+def get_data_handler(dataset_name: str, **kwargs) -> Union[DataHandler, LiverFibrosisDataHandler]:
+    """
+    Factory function to get the appropriate DataHandler for a dataset.
+
+    Args:
+        dataset_name: Name of the dataset (pathmnist, dermamnist, liver4, etc.)
+        **kwargs: Additional arguments passed to DataHandler constructor
+
+    Returns:
+        DataHandler or LiverFibrosisDataHandler instance
+    """
+    dataset_name = dataset_name.lower()
+    dataset_info = get_dataset_info(dataset_name)
+
+    if dataset_info.get("is_liver_dataset", False):
+        return LiverFibrosisDataHandler(dataset_name=dataset_name, **kwargs)
+    else:
+        return DataHandler(dataset_name=dataset_name, **kwargs)
 
 
 def main():

@@ -92,8 +92,17 @@ def parse_args():
         type=str,
         nargs="+",
         default=["pathmnist"],
-        help="MedMNIST datasets to search (default: pathmnist). "
-             "Options: pathmnist, dermamnist, retinamnist, organamnist, bloodmnist, tissuemnist"
+        help="Datasets to search (default: pathmnist). "
+             "MedMNIST: pathmnist, dermamnist, retinamnist, organamnist, bloodmnist, tissuemnist. "
+             "Liver Fibrosis: liver4 (4-class), liver2s (2-class significant), liver2a (2-class any)."
+    )
+
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default=None,
+        help="Custom data path for liver fibrosis datasets (default: dataset/). "
+             "Not needed for MedMNIST datasets which use ~/.medmnist/."
     )
 
     # === Search Space Configuration ===
@@ -325,6 +334,11 @@ def build_commands(config: Dict[str, Any], args, run_name: str) -> Tuple[List[st
         "--results-dir", args.results_dir,
     ]
 
+    # Add data-path for liver fibrosis datasets
+    if config['dataset'].startswith('liver'):
+        data_path = args.data_path if args.data_path else "dataset/"
+        base_cmd.extend(["--data-path", data_path])
+
     # Edit stage command
     cmd_edit = base_cmd + ["--stage", "edit"]
 
@@ -431,6 +445,12 @@ def run_baseline_worker(
         "--log-dir", args.logs_dir,
         "--results-dir", args.results_dir,
     ]
+
+    # Add data-path for liver fibrosis datasets
+    if dataset.startswith('liver'):
+        data_path = args.data_path if args.data_path else "dataset/"
+        cmd.extend(["--data-path", data_path])
+
     if baseline_type == "baseline2":
         cmd.extend(["--baseline-lr", str(args.baseline_lr)])
 

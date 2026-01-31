@@ -4,6 +4,8 @@ Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for c
 
 ## Supported Datasets
 
+### MedMNIST Datasets
+
 | Dataset | Classes | Channels | Task Type | Description |
 |---------|---------|----------|-----------|-------------|
 | **pathmnist** | 9 | RGB | Multi-class | Colon Pathology - 9 tissue types |
@@ -12,6 +14,16 @@ Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for c
 | **organamnist** | 11 | Grayscale | Multi-class | Abdominal CT - 11 organ types (Shape-based) |
 | **bloodmnist** | 8 | RGB | Multi-class | Blood Cell Microscopy - 8 cell types |
 | **tissuemnist** | 8 | Grayscale | Multi-class | Kidney Cortex Microscopy - 8 tissue types |
+
+### Liver Fibrosis Dataset (MERIT Paper)
+
+| Dataset | Classes | Channels | Task Type | Description |
+|---------|---------|----------|-----------|-------------|
+| **liver4** | 4 | Grayscale | Multi-class | Liver Fibrosis Staging (F0, F1, F2, F3-F4) |
+| **liver2s** | 2 | Grayscale | Binary | Significant Fibrosis Detection (F0-F2 vs F3-F4) |
+| **liver2a** | 2 | Grayscale | Binary | Any Fibrosis Detection (F0 vs F1-F4) |
+
+**Source**: 703 ultrasound images (256x256) from the MERIT paper.
 
 **Note**: Grayscale datasets are automatically converted to 3-channel RGB for ViT compatibility.
 
@@ -61,7 +73,11 @@ E:\ModelEdit_val\
 │       └── baseline_finetune_errors_summary.csv  # Baseline 2 results
 ├── reference/                        # Reference implementations
 │   ├── AlphaEdit/                   # Null-space projection method
-│   └── ASTRA/                       # Activation steering method
+│   ├── ASTRA/                       # Activation steering method
+│   └── MERIT/                       # Liver fibrosis dataset source
+├── dataset/                          # Liver Fibrosis data (MERIT paper)
+│   ├── imgs.npy                     # Images (703 samples, 256x256x1)
+│   └── labs.npy                     # Labels (0-3)
 ├── pyproject.toml                   # uv package configuration
 └── README.md
 ```
@@ -97,9 +113,7 @@ source .venv/bin/activate
 
 ### Data Location
 
-MedMNIST datasets should be at: `~/.medmnist/{dataset}_224.npz`
-
-Download from: https://medmnist.com/
+**MedMNIST datasets**: `~/.medmnist/{dataset}_224.npz` — Download from https://medmnist.com/
 
 ```bash
 # Example paths:
@@ -111,15 +125,28 @@ Download from: https://medmnist.com/
 ~/.medmnist/tissuemnist_224.npz
 ```
 
+**Liver Fibrosis dataset**: `dataset/` directory in project root
+
+```bash
+# Required files:
+dataset/imgs.npy   # Array of dicts, each {'4': np.ndarray(256,256,1)}, float32 z-score normalized
+dataset/labs.npy   # Labels array (0=F0, 1=F1, 2=F2, 3=F3-F4)
+```
+
 ### Running the Pipeline
 
 ```bash
 # Run complete pipeline with default dataset (pathmnist)
 uv run python src/main.py --stage full --timestamp
 
-# Run with a specific dataset
+# Run with a specific MedMNIST dataset
 uv run python src/main.py --stage full --dataset dermamnist --timestamp
 uv run python src/main.py --stage full --dataset organamnist --timestamp
+
+# Run with Liver Fibrosis dataset (requires --data-path)
+uv run python src/main.py --stage full --dataset liver4 --data-path dataset/ --timestamp
+uv run python src/main.py --stage full --dataset liver2s --data-path dataset/ --timestamp  # Significant fibrosis
+uv run python src/main.py --stage full --dataset liver2a --data-path dataset/ --timestamp  # Any fibrosis
 
 # Run with custom run name
 uv run python src/main.py --stage full --dataset pathmnist --run-name experiment_v1
@@ -268,12 +295,12 @@ Both baselines use the same evaluation framework:
 ### Dataset Selection
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--dataset` | `pathmnist` | MedMNIST dataset: `pathmnist`, `dermamnist`, `retinamnist`, `organamnist`, `bloodmnist`, `tissuemnist` |
+| `--dataset` | `pathmnist` | Dataset name: MedMNIST (`pathmnist`, `dermamnist`, `retinamnist`, `organamnist`, `bloodmnist`, `tissuemnist`) or Liver Fibrosis (`liver4`, `liver2s`, `liver2a`) |
 
 ### Data Options
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--data-path` | `~/.medmnist/{dataset}_224.npz` | MedMNIST data file |
+| `--data-path` | auto | Data path. MedMNIST: `~/.medmnist/{dataset}_224.npz`. Liver: `dataset/` directory |
 | `--ft-train-ratio` | 0.9 | Fraction of official train for FT-Train (remaining goes to Edit-Discovery) |
 | `--seed` | 42 | Random seed for reproducibility |
 
@@ -512,16 +539,19 @@ uv run python scripts/param_search.py --datasets pathmnist \
 # 4. Multi-dataset search
 uv run python scripts/param_search.py --datasets pathmnist dermamnist organamnist
 
-# 5. Multi-GPU parallel execution (auto-detect all GPUs)
+# 5. Liver fibrosis dataset search (requires --data-path for custom data location)
+uv run python scripts/param_search.py --datasets liver4 --data-path dataset/
+
+# 6. Multi-GPU parallel execution (auto-detect all GPUs)
 uv run python scripts/param_search.py --datasets pathmnist --parallel 0
 
-# 6. Pin to specific GPU
+# 7. Pin to specific GPU
 uv run python scripts/param_search.py --datasets pathmnist --gpu 0
 
-# 7. Continue from a specific experiment
+# 8. Continue from a specific experiment
 uv run python scripts/param_search.py --continue-from 10
 
-# 8. Collect results after experiments
+# 9. Collect results after experiments
 uv run python scripts/collect_results.py --results-dir results
 ```
 
@@ -529,7 +559,8 @@ uv run python scripts/collect_results.py --results-dir results
 
 | Parameter | CLI Argument | Default | Description |
 |-----------|--------------|---------|-------------|
-| Dataset | `--datasets` | `[pathmnist]` | MedMNIST datasets to search |
+| Dataset | `--datasets` | `[pathmnist]` | Datasets to search. MedMNIST: pathmnist, dermamnist, retinamnist, organamnist, bloodmnist, tissuemnist. Liver: liver4, liver2s, liver2a |
+| Data Path | `--data-path` | None | Custom data path for liver datasets (default: `dataset/`). Not needed for MedMNIST |
 | Projection Samples | `--projection-samples-range` | `[500]` | Number of FT-Train samples for null-space projection |
 | Nullspace Threshold | `--nullspace-threshold-range` | `[1e-2]` | Eigenvalue threshold for null-space selection |
 | Num Edit Layers | `--num-edit-layers-range` | `[1,2,3,4,5]` | Top-K ASTRA layers to edit |
@@ -684,6 +715,23 @@ These parameters affect various aspects of the pipeline but are less likely to s
 
 ## Changelog
 
+### v1.8.0 (2026-02-01)
+- **Liver Fibrosis Dataset Support**: Added custom dataset from MERIT paper
+  - `liver4`: 4-class staging (F0, F1, F2, F3-F4)
+  - `liver2s`: 2-class significant fibrosis detection (F0-F2 vs F3-F4)
+  - `liver2a`: 2-class any fibrosis detection (F0 vs F1-F4)
+  - 703 ultrasound images (256x256 grayscale, z-score normalized)
+  - Split strategy aligned with MERIT paper: 60% Train / 20% Val / 20% Test
+- **LiverFibrosisDataHandler**: New data handler for custom .npy format
+  - Handles float32 z-score normalized images
+  - Automatic label remapping for binary classification modes
+  - Stratified splitting with reproducible indices
+- **Factory Pattern**: `get_data_handler()` function for automatic handler selection
+- **Parameter Search Extension**: `scripts/param_search.py` now supports liver datasets
+  - Added `--data-path` argument for custom data locations
+  - Automatic `--data-path dataset/` for liver datasets in generated commands
+- **Reference Code**: Added `reference/MERIT/` for liver fibrosis dataset source
+
 ### v1.7.0 (2026-01-31)
 - **Parameter Search System (v2)**: Complete rewrite of experiment scripts
   - `scripts/param_search.py`: Now runs both edit AND eval stages for complete test set metrics
@@ -790,7 +838,8 @@ These parameters affect various aspects of the pipeline but are less likely to s
 - **AlphaEdit**: Null-space projection for knowledge editing without catastrophic forgetting
 - **ASTRA**: Activation steering for targeted representation adjustment
 - **ViT**: "An Image is Worth 16x16 Words" (Dosovitskiy et al.)
-- **MedMNIST**: Standardized medical image classification benchmark (PathMNIST)
+- **MedMNIST**: Standardized medical image classification benchmark
+- **MERIT**: Multi-view Evidential Learning for Reliable and Interpretable Liver Fibrosis Staging (Liu et al., Medical Image Analysis, [arXiv:2405.02918](https://arxiv.org/abs/2405.02918))
 
 ## Important Notes
 
