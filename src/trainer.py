@@ -327,7 +327,7 @@ class Trainer:
                     filepath=self.checkpoint_dir / self.checkpoint_name,
                     is_best=True
                 )
-                print(f"  ✓ New best model saved! (Acc: {self.best_acc:.2f}%)")
+                print(f"  [OK] New best model saved! (Acc: {self.best_acc:.2f}%)")
         
         total_time = time.time() - start_time
         print(f"\n{'='*60}")

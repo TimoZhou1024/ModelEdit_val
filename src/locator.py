@@ -1057,7 +1057,7 @@ def main():
     locator.visualize_importance()
     locator.export_results()
 
-    print("\n✓ Causal tracing test complete!")
+    print("\n[OK] Causal tracing test complete!")
 
 
 if __name__ == "__main__":
