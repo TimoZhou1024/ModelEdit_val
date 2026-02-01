@@ -163,6 +163,19 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--no-timestamp",
+        action="store_true",
+        help="Disable timestamp in output directory (allows overwriting previous results)"
+    )
+
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Custom name for this run (used instead of timestamp)"
+    )
+
+    parser.add_argument(
         "--results-dir",
         type=str,
         default="results",
@@ -726,8 +739,22 @@ def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
 def main():
     args = parse_args()
 
-    # Create output directory
+    # Create output directory with versioning (timestamp by default)
     output_dir = Path(args.output_dir)
+
+    # Apply run name or timestamp suffix (timestamp is default)
+    if args.run_name:
+        suffix = args.run_name
+    elif not args.no_timestamp:
+        # Timestamp is now the DEFAULT behavior
+        suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+    else:
+        suffix = None
+
+    if suffix:
+        output_dir = output_dir / suffix
+        print(f"Run identifier: {suffix}")
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Build experiment configs
