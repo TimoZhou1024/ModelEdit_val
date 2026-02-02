@@ -196,9 +196,14 @@ def parse_metric_csv(csv_path: Path) -> Dict[str, Any]:
     return metrics
 
 
-def extract_core_metrics(results_dir: Path) -> Dict[str, Any]:
+def extract_core_metrics(results_dir: Path, log_dir: Path = None, run_name: str = None) -> Dict[str, Any]:
     """
     Extract core metrics from a single experiment's results directory.
+
+    Args:
+        results_dir: Path to the results directory
+        log_dir: Optional path to logs directory to extract edit layers
+        run_name: Optional run name to locate edit_log.csv
 
     Returns a dict with standardized metric names.
     """
@@ -258,7 +263,47 @@ def extract_core_metrics(results_dir: Path) -> Dict[str, Any]:
         metrics['discovery_acc_after'] = disc_data.get('accuracy_edit')
         metrics['discovery_acc_delta'] = disc_data.get('accuracy_delta')
 
+    # === Extract actual edited layers from edit_log.csv ===
+    if log_dir is not None and run_name is not None:
+        edit_layers = extract_edit_layers_from_log(log_dir, run_name)
+        if edit_layers is not None:
+            metrics['actual_edit_layers'] = edit_layers
+
     return metrics
+
+
+def extract_edit_layers_from_log(log_dir: Path, run_name: str) -> Optional[List[int]]:
+    """Extract actual edited layers from edit_log.csv.
+
+    Args:
+        log_dir: Base logs directory (e.g., "logs")
+        run_name: Run name (e.g., "pathmnist/proj500_edit30_astra3_thresh1e-2")
+
+    Returns:
+        List of unique layer indices that were edited, or None if not found
+    """
+    # Try to find edit_log.csv in log_dir/run_name/
+    edit_log_path = log_dir / run_name / "edit_log.csv"
+
+    if not edit_log_path.exists():
+        return None
+
+    try:
+        with open(edit_log_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            layers = set()
+            for row in reader:
+                if 'layer' in row:
+                    try:
+                        layers.add(int(row['layer']))
+                    except (ValueError, TypeError):
+                        pass
+            if layers:
+                return sorted(list(layers))
+    except Exception as e:
+        print(f"Warning: Failed to parse edit_log.csv: {e}")
+
+    return None
 
 
 def find_experiment_dirs(results_dir: Path, datasets: Optional[List[str]] = None) -> List[Path]:
@@ -357,6 +402,9 @@ def main():
     # Collect metrics from all experiments
     all_metrics = []
 
+    # Default logs directory
+    log_dir = Path("logs")
+
     for exp_dir in sorted(experiment_dirs):
         run_name = compute_run_name(exp_dir, results_dir)
 
@@ -366,8 +414,8 @@ def main():
         # Parse configuration from run name
         config = parse_run_name(run_name)
 
-        # Extract metrics
-        metrics = extract_core_metrics(exp_dir)
+        # Extract metrics (pass log_dir and run_name for actual_edit_layers)
+        metrics = extract_core_metrics(exp_dir, log_dir=log_dir, run_name=run_name)
 
         # Combine config and metrics
         row = {
@@ -382,6 +430,7 @@ def main():
     # Define output columns (ordered)
     config_columns = [
         'run_name', 'dataset', 'method', 'mode', 'num_edit_layers', 'edit_layers',
+        'actual_edit_layers',  # NEW: Actual layers from edit_log.csv
         'projection_samples', 'nullspace_threshold', 'max_edits'
     ]
 
@@ -413,9 +462,11 @@ def main():
         writer.writeheader()
 
         for row in all_metrics:
-            # Convert list to string for edit_layers
+            # Convert list to string for edit_layers and actual_edit_layers
             if isinstance(row.get('edit_layers'), list):
                 row['edit_layers'] = ','.join(map(str, row['edit_layers']))
+            if isinstance(row.get('actual_edit_layers'), list):
+                row['actual_edit_layers'] = ','.join(map(str, row['actual_edit_layers']))
             writer.writerow(row)
 
     print(f"\nSummary saved to: {output_path}")

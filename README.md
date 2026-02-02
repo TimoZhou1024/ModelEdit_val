@@ -713,7 +713,86 @@ The following parameters are currently fixed at default values but could be expl
 
 These parameters affect various aspects of the pipeline but are less likely to significantly impact the core editing effectiveness compared to the primary search dimensions.
 
+## W&B Integration
+
+This project supports [Weights & Biases](https://wandb.ai/) for experiment tracking and hyperparameter sweeps.
+
+### Setup
+
+```bash
+# Install wandb (already in dependencies)
+uv sync
+
+# Login to W&B
+wandb login
+```
+
+### Sweep Mode (Recommended for Hyperparameter Search)
+
+Use wandb sweeps for automated hyperparameter optimization with Bayesian search:
+
+```bash
+# 1. Create sweep (returns sweep_id)
+wandb sweep configs/sweep_pathmnist.yaml
+
+# 2. Run agent (single GPU)
+wandb agent <username>/<project>/<sweep_id>
+
+# 3. Multi-GPU parallel (run in separate terminals)
+CUDA_VISIBLE_DEVICES=0 wandb agent <sweep_id> &
+CUDA_VISIBLE_DEVICES=1 wandb agent <sweep_id> &
+
+# 4. Limit number of runs
+wandb agent <sweep_id> --count 20
+```
+
+**Available Sweep Configs:**
+- `configs/sweep_pathmnist.yaml` - PathMNIST dataset
+- `configs/sweep_dermamnist.yaml` - DermaMNIST dataset
+- `configs/sweep_liver.yaml` - Liver Fibrosis datasets
+
+### param_search Mode (with W&B Logging)
+
+Add `--wandb` flag to enable W&B logging for existing param_search runs:
+
+```bash
+uv run python scripts/param_search.py \
+    --datasets pathmnist \
+    --num-edit-layers-range 1 3 5 \
+    --max-edits-range 10 30 50 \
+    --wandb \
+    --wandb-project vit-model-editing \
+    --wandb-tags param-search pathmnist
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--wandb` | False | Enable W&B logging |
+| `--wandb-project` | `vit-model-editing` | W&B project name |
+| `--wandb-entity` | None | W&B team/username |
+| `--wandb-tags` | [] | Tags for runs |
+
+### Metrics Logged
+
+All experiments log these metrics to W&B:
+
+| Metric | Description |
+|--------|-------------|
+| `test/accuracy_delta` | Test set accuracy improvement (primary) |
+| `test/stability` | Fraction of correct samples preserved |
+| `edit/fix_rate` | Fraction of target errors corrected |
+| `proj/stability` | FT-Train stability (forgetting metric) |
+| `timing/edit_seconds` | Edit stage duration |
+
 ## Changelog
+
+### v1.9.0 (2026-02-01)
+- **W&B Integration**: Added Weights & Biases support for experiment tracking and sweeps
+  - `scripts/wandb_sweep.py`: Sweep agent entry point
+  - `configs/sweep_*.yaml`: Pre-configured sweep configs for each dataset
+  - `--wandb` flag for param_search.py logging
+  - `run_edit_eval_pipeline()` function for programmatic pipeline execution
+- **Sweep Configurations**: Bayesian optimization configs for PathMNIST, DermaMNIST, Liver
 
 ### v1.8.0 (2026-02-01)
 - **Liver Fibrosis Dataset Support**: Added custom dataset from MERIT paper

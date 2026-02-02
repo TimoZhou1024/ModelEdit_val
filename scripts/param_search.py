@@ -260,6 +260,35 @@ def parse_args():
         help="Learning rate for baseline2 finetune-on-errors (default: 1e-5)"
     )
 
+    # === W&B Integration ===
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Enable Weights & Biases logging for all experiments"
+    )
+
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="vit-model-editing",
+        help="W&B project name (default: vit-model-editing)"
+    )
+
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default=None,
+        help="W&B entity (team or username). Default: None (uses default entity)"
+    )
+
+    parser.add_argument(
+        "--wandb-tags",
+        type=str,
+        nargs="+",
+        default=[],
+        help="Tags to add to W&B runs (e.g., --wandb-tags param-search pathmnist)"
+    )
+
     return parser.parse_args()
 
 
@@ -331,8 +360,8 @@ def build_experiment_configs(args) -> List[Dict[str, Any]]:
     return configs
 
 
-def build_commands(config: Dict[str, Any], args, run_name: str) -> Tuple[List[str], List[str]]:
-    """Build command lines for edit and eval stages."""
+def build_commands(config: Dict[str, Any], args, run_name: str) -> Tuple[List[str], List[str], List[str]]:
+    """Build command lines for locate, edit, and eval stages."""
     base_cmd = [
         sys.executable,
         str(SRC_DIR / "main.py"),
@@ -352,6 +381,9 @@ def build_commands(config: Dict[str, Any], args, run_name: str) -> Tuple[List[st
         data_path = args.data_path if args.data_path else "dataset/"
         base_cmd.extend(["--data-path", data_path])
 
+    # Locate stage command (ASTRA causal tracing)
+    cmd_locate = base_cmd + ["--stage", "locate"]
+
     # Edit stage command
     cmd_edit = base_cmd + ["--stage", "edit"]
 
@@ -364,7 +396,7 @@ def build_commands(config: Dict[str, Any], args, run_name: str) -> Tuple[List[st
     # Eval stage command
     cmd_eval = base_cmd + ["--stage", "eval"]
 
-    return cmd_edit, cmd_eval
+    return cmd_locate, cmd_edit, cmd_eval
 
 
 def parse_metric_csv(csv_path: Path) -> Dict[str, Any]:
@@ -390,8 +422,14 @@ def parse_metric_csv(csv_path: Path) -> Dict[str, Any]:
     return metrics
 
 
-def parse_results(results_dir: Path) -> Dict[str, Any]:
-    """Parse results from a completed experiment."""
+def parse_results(results_dir: Path, log_dir: Path = None, run_name: str = None) -> Dict[str, Any]:
+    """Parse results from a completed experiment.
+
+    Args:
+        results_dir: Path to the results directory (e.g., results/{run_name}/)
+        log_dir: Optional path to logs directory to extract edit layers
+        run_name: Optional run name to locate edit_log.csv
+    """
     results = {}
 
     # Define CSV files to parse and their prefixes
@@ -409,7 +447,52 @@ def parse_results(results_dir: Path) -> Dict[str, Any]:
         for metric, value in metrics.items():
             results[f'{prefix}_{metric}'] = value
 
+    # Extract actual edited layers from edit_log.csv if log_dir provided
+    if log_dir is not None and run_name is not None:
+        edit_layers = extract_edit_layers(log_dir, run_name)
+        if edit_layers is not None:
+            results['actual_edit_layers'] = edit_layers
+
     return results
+
+
+def extract_edit_layers(log_dir: Path, run_name: str) -> Optional[List[int]]:
+    """Extract actual edited layers from edit_log.csv.
+
+    Args:
+        log_dir: Base logs directory (e.g., "logs")
+        run_name: Run name (e.g., "pathmnist/proj500_edit30_astra3_thresh1e-2")
+
+    Returns:
+        List of unique layer indices that were edited, or None if not found
+    """
+    # Try to find edit_log.csv in log_dir/run_name/
+    edit_log_path = log_dir / run_name / "edit_log.csv"
+
+    if not edit_log_path.exists():
+        # Try alternative location for head editing
+        head_edit_log_path = log_dir / run_name / "head_edit_log.csv"
+        if head_edit_log_path.exists():
+            # Head editing doesn't have layer info in the same way
+            return None
+        return None
+
+    try:
+        with open(edit_log_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            layers = set()
+            for row in reader:
+                if 'layer' in row:
+                    try:
+                        layers.add(int(row['layer']))
+                    except (ValueError, TypeError):
+                        pass
+            if layers:
+                return sorted(list(layers))
+    except Exception as e:
+        print(f"Warning: Failed to parse edit_log.csv: {e}")
+
+    return None
 
 
 def get_unique_baseline_keys(configs: List[Dict[str, Any]]) -> List[Tuple[str, int]]:
@@ -561,6 +644,10 @@ def run_baseline_worker(
                     else:
                         print(f"  {key}: {val}")
 
+    # Log to W&B if enabled
+    if getattr(args, 'wandb', False) and not args.dry_run:
+        _log_experiment_to_wandb(record, config, args)
+
     return record
 
 
@@ -576,14 +663,15 @@ def run_experiment_worker(
     # Add method field to config for CSV output
     config['method'] = 'alphaedit'
 
-    # Build commands
-    cmd_edit, cmd_eval = build_commands(config, args, run_name)
+    # Build commands (now returns 3 commands)
+    cmd_locate, cmd_edit, cmd_eval = build_commands(config, args, run_name)
 
     # Create experiment record
     experiment = {
         'exp_idx': exp_idx,
         'run_name': run_name,
         'config': config,
+        'command_locate': ' '.join(cmd_locate),
         'command_edit': ' '.join(cmd_edit),
         'command_eval': ' '.join(cmd_eval),
         'status': 'pending',
@@ -592,12 +680,15 @@ def run_experiment_worker(
         'end_time': None,
         'duration_seconds': None,
         'edit_time_seconds': None,  # Time for edit stage only (excluding eval)
+        'locate_time_seconds': None,  # Time for locate stage
         'results': {},
     }
 
     if args.dry_run:
         print(f"\n[DRY RUN] Experiment {exp_idx}: {run_name}")
         print(f"  GPU: {gpu_id if gpu_id is not None else 'auto'}")
+        if config['mode'] == 'astra':
+            print(f"  Locate: {' '.join(cmd_locate)}")
         print(f"  Edit: {' '.join(cmd_edit)}")
         print(f"  Eval: {' '.join(cmd_eval)}")
         experiment['status'] = 'skipped'
@@ -618,6 +709,34 @@ def run_experiment_worker(
     start = time.time()
 
     try:
+        # Run locate stage for ASTRA mode
+        if config['mode'] == 'astra':
+            print("\n--- Running LOCATE stage (ASTRA causal tracing) ---")
+            locate_start = time.time()
+            result_locate = subprocess.run(
+                cmd_locate,
+                capture_output=True,
+                text=True,
+                cwd=str(PROJECT_ROOT),
+                env=env,
+                timeout=args.timeout
+            )
+            locate_end = time.time()
+            experiment['locate_time_seconds'] = locate_end - locate_start
+
+            if result_locate.returncode != 0:
+                print(f"[ERROR] Locate stage failed with return code {result_locate.returncode}")
+                print(f"STDERR (last 2000 chars): {result_locate.stderr[-2000:]}")
+                experiment['status'] = 'failed_locate'
+                experiment['error'] = result_locate.stderr[-2000:]
+                # Early exit if locate fails
+                end = time.time()
+                experiment['end_time'] = datetime.now().isoformat()
+                experiment['duration_seconds'] = end - start
+                return experiment
+            else:
+                print(f"Locate stage completed in {experiment['locate_time_seconds']:.1f}s")
+
         # Run edit stage
         print("\n--- Running EDIT stage ---")
         edit_start = time.time()
@@ -674,10 +793,14 @@ def run_experiment_worker(
     if experiment['status'] == 'success':
         results_path = Path(args.results_dir) / run_name
         if results_path.exists():
-            experiment['results'] = parse_results(results_path)
+            experiment['results'] = parse_results(
+                results_path,
+                log_dir=Path(args.logs_dir),
+                run_name=run_name
+            )
             print("\nResults Summary:")
             # Print key metrics
-            for key in ['edit_fix_rate', 'test_accuracy_delta', 'proj_stability']:
+            for key in ['edit_fix_rate', 'test_accuracy_delta', 'proj_stability', 'actual_edit_layers']:
                 if key in experiment['results']:
                     val = experiment['results'][key]
                     if isinstance(val, float):
@@ -685,7 +808,55 @@ def run_experiment_worker(
                     else:
                         print(f"  {key}: {val}")
 
+    # Log to W&B if enabled
+    if getattr(args, 'wandb', False) and not args.dry_run:
+        _log_experiment_to_wandb(experiment, config, args)
+
     return experiment
+
+
+def _log_experiment_to_wandb(experiment: Dict[str, Any], config: Dict[str, Any], args) -> None:
+    """Log a single experiment to Weights & Biases."""
+    try:
+        import wandb
+
+        # Initialize run for this experiment
+        run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=experiment['run_name'],
+            config=config,
+            tags=args.wandb_tags + [config['dataset'], config['method']],
+            reinit=True,  # Allow multiple runs in same process
+        )
+
+        # Log metrics
+        results = experiment.get('results', {})
+        metrics = {
+            "edit/fix_rate": results.get("edit_fix_rate", 0),
+            "edit/accuracy_delta": results.get("edit_accuracy_delta", 0),
+            "test/accuracy_before": results.get("test_accuracy_orig", 0),
+            "test/accuracy_after": results.get("test_accuracy_edit", 0),
+            "test/accuracy_delta": results.get("test_accuracy_delta", 0),
+            "test/stability": results.get("test_stability", 0),
+            "proj/stability": results.get("proj_stability", 0),
+            "proj/regression_rate": results.get("proj_regression_rate", 0),
+            "timing/edit_seconds": experiment.get("edit_time_seconds", 0),
+            "timing/total_seconds": experiment.get("duration_seconds", 0),
+            "status": experiment.get("status", "unknown"),
+        }
+        wandb.log(metrics)
+
+        # Set summary for easy comparison
+        wandb.summary["test_accuracy_delta"] = results.get("test_accuracy_delta", 0)
+        wandb.summary["status"] = experiment.get("status", "unknown")
+
+        run.finish()
+
+    except ImportError:
+        print("[WARN] wandb not installed, skipping logging")
+    except Exception as e:
+        print(f"[WARN] Failed to log to wandb: {e}")
 
 
 def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
@@ -701,7 +872,7 @@ def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
         result_keys.update(exp['results'].keys())
 
     # Build header
-    base_columns = ['exp_idx', 'run_name', 'status', 'duration_seconds', 'edit_time_seconds', 'gpu_id']
+    base_columns = ['exp_idx', 'run_name', 'status', 'duration_seconds', 'locate_time_seconds', 'edit_time_seconds', 'gpu_id']
     config_columns = sorted(config_keys)
     result_columns = sorted(result_keys)
     all_columns = base_columns + config_columns + result_columns
@@ -717,6 +888,7 @@ def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
                 'run_name': exp['run_name'],
                 'status': exp['status'],
                 'duration_seconds': exp.get('duration_seconds'),
+                'locate_time_seconds': exp.get('locate_time_seconds'),
                 'edit_time_seconds': exp.get('edit_time_seconds'),
                 'gpu_id': exp.get('gpu_id'),
             }
@@ -729,7 +901,12 @@ def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
                     row[k] = val
             # Add result values
             for k in result_columns:
-                row[k] = exp['results'].get(k)
+                val = exp['results'].get(k)
+                # Convert list to comma-separated string (for actual_edit_layers)
+                if isinstance(val, list):
+                    row[k] = ','.join(map(str, val))
+                else:
+                    row[k] = val
 
             writer.writerow(row)
 
@@ -789,7 +966,7 @@ def main():
         print("\n[DRY RUN MODE - No experiments will be executed]")
 
     # Show search space
-    print(f"\nSearch Space:")
+    print("\nSearch Space:")
     print(f"  --datasets: {args.datasets}")
     print(f"  --projection-samples-range: {args.projection_samples_range}")
     print(f"  --nullspace-threshold-range: {args.nullspace_threshold_range}")
@@ -930,7 +1107,7 @@ def main():
                     best_exp = exp
 
         if best_exp:
-            print(f"\nBest Configuration (by test accuracy delta):")
+            print("\nBest Configuration (by test accuracy delta):")
             print(f"  Experiment: {best_exp['run_name']}")
             print(f"  Config: {json.dumps(best_exp['config'], indent=4)}")
             print(f"  Test Accuracy Delta: {best_metric * 100:+.2f}%")
