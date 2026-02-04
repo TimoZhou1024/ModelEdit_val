@@ -360,9 +360,9 @@ def build_experiment_configs(args) -> List[Dict[str, Any]]:
     return configs
 
 
-def build_commands(config: Dict[str, Any], args, run_name: str) -> Tuple[List[str], List[str], List[str]]:
-    """Build command lines for locate, edit, and eval stages."""
-    base_cmd = [
+def build_commands(config: Dict[str, Any], args, run_name: str) -> List[str]:
+    """Build command line for --stage full (includes locate, edit, eval)."""
+    cmd = [
         sys.executable,
         str(SRC_DIR / "main.py"),
         "--dataset", config['dataset'],
@@ -374,29 +374,22 @@ def build_commands(config: Dict[str, Any], args, run_name: str) -> Tuple[List[st
         "--checkpoint-dir", args.checkpoints_dir,
         "--log-dir", args.logs_dir,
         "--results-dir", args.results_dir,
+        "--stage", "full",  # Use full pipeline (locate → edit → eval)
     ]
 
     # Add data-path for liver fibrosis datasets
     if config['dataset'].startswith('liver'):
         data_path = args.data_path if args.data_path else "dataset/"
-        base_cmd.extend(["--data-path", data_path])
+        cmd.extend(["--data-path", data_path])
 
-    # Locate stage command (ASTRA causal tracing)
-    cmd_locate = base_cmd + ["--stage", "locate"]
-
-    # Edit stage command
-    cmd_edit = base_cmd + ["--stage", "edit"]
-
+    # Layer selection mode
     if config['mode'] == 'astra':
-        cmd_edit.extend(["--num-edit-layers", str(config['num_edit_layers'])])
+        cmd.extend(["--num-edit-layers", str(config['num_edit_layers'])])
     else:
-        cmd_edit.append("--no-astra-layers")
-        cmd_edit.extend(["--edit-layers"] + [str(layer) for layer in config['edit_layers']])
+        cmd.append("--no-astra-layers")
+        cmd.extend(["--edit-layers"] + [str(layer) for layer in config['edit_layers']])
 
-    # Eval stage command
-    cmd_eval = base_cmd + ["--stage", "eval"]
-
-    return cmd_locate, cmd_edit, cmd_eval
+    return cmd
 
 
 def parse_metric_csv(csv_path: Path) -> Dict[str, Any]:
@@ -657,40 +650,33 @@ def run_experiment_worker(
     args,
     gpu_id: Optional[int] = None
 ) -> Dict[str, Any]:
-    """Worker function to run a single experiment."""
+    """Worker function to run a single experiment using --stage full."""
     run_name = build_run_name(config)
 
     # Add method field to config for CSV output
     config['method'] = 'alphaedit'
 
-    # Build commands (now returns 3 commands)
-    cmd_locate, cmd_edit, cmd_eval = build_commands(config, args, run_name)
+    # Build single command for full pipeline
+    cmd = build_commands(config, args, run_name)
 
     # Create experiment record
     experiment = {
         'exp_idx': exp_idx,
         'run_name': run_name,
         'config': config,
-        'command_locate': ' '.join(cmd_locate),
-        'command_edit': ' '.join(cmd_edit),
-        'command_eval': ' '.join(cmd_eval),
+        'command': ' '.join(cmd),
         'status': 'pending',
         'gpu_id': gpu_id,
         'start_time': None,
         'end_time': None,
         'duration_seconds': None,
-        'edit_time_seconds': None,  # Time for edit stage only (excluding eval)
-        'locate_time_seconds': None,  # Time for locate stage
         'results': {},
     }
 
     if args.dry_run:
         print(f"\n[DRY RUN] Experiment {exp_idx}: {run_name}")
         print(f"  GPU: {gpu_id if gpu_id is not None else 'auto'}")
-        if config['mode'] == 'astra':
-            print(f"  Locate: {' '.join(cmd_locate)}")
-        print(f"  Edit: {' '.join(cmd_edit)}")
-        print(f"  Eval: {' '.join(cmd_eval)}")
+        print(f"  Cmd: {' '.join(cmd)}")
         experiment['status'] = 'skipped'
         return experiment
 
@@ -709,73 +695,25 @@ def run_experiment_worker(
     start = time.time()
 
     try:
-        # Run locate stage for ASTRA mode
-        if config['mode'] == 'astra':
-            print("\n--- Running LOCATE stage (ASTRA causal tracing) ---")
-            locate_start = time.time()
-            result_locate = subprocess.run(
-                cmd_locate,
-                capture_output=True,
-                text=True,
-                cwd=str(PROJECT_ROOT),
-                env=env,
-                timeout=args.timeout
-            )
-            locate_end = time.time()
-            experiment['locate_time_seconds'] = locate_end - locate_start
-
-            if result_locate.returncode != 0:
-                print(f"[ERROR] Locate stage failed with return code {result_locate.returncode}")
-                print(f"STDERR (last 2000 chars): {result_locate.stderr[-2000:]}")
-                experiment['status'] = 'failed_locate'
-                experiment['error'] = result_locate.stderr[-2000:]
-                # Early exit if locate fails
-                end = time.time()
-                experiment['end_time'] = datetime.now().isoformat()
-                experiment['duration_seconds'] = end - start
-                return experiment
-            else:
-                print(f"Locate stage completed in {experiment['locate_time_seconds']:.1f}s")
-
-        # Run edit stage
-        print("\n--- Running EDIT stage ---")
-        edit_start = time.time()
-        result_edit = subprocess.run(
-            cmd_edit,
+        # Run full pipeline (locate → edit → eval)
+        print("\n--- Running FULL pipeline (locate → edit → eval) ---")
+        result = subprocess.run(
+            cmd,
             capture_output=True,
             text=True,
             cwd=str(PROJECT_ROOT),
             env=env,
             timeout=args.timeout
         )
-        edit_end = time.time()
-        experiment['edit_time_seconds'] = edit_end - edit_start
 
-        if result_edit.returncode != 0:
-            print(f"[ERROR] Edit stage failed with return code {result_edit.returncode}")
-            print(f"STDERR (last 2000 chars): {result_edit.stderr[-2000:]}")
-            experiment['status'] = 'failed_edit'
-            experiment['error'] = result_edit.stderr[-2000:]
+        if result.returncode != 0:
+            print(f"[ERROR] Pipeline failed with return code {result.returncode}")
+            print(f"STDERR (last 2000 chars): {result.stderr[-2000:]}")
+            experiment['status'] = 'failed'
+            experiment['error'] = result.stderr[-2000:]
         else:
-            print(f"Edit stage completed in {experiment['edit_time_seconds']:.1f}s")
-            # Run eval stage
-            print("\n--- Running EVAL stage ---")
-            result_eval = subprocess.run(
-                cmd_eval,
-                capture_output=True,
-                text=True,
-                cwd=str(PROJECT_ROOT),
-                env=env,
-                timeout=args.timeout
-            )
-
-            if result_eval.returncode != 0:
-                print(f"[ERROR] Eval stage failed with return code {result_eval.returncode}")
-                print(f"STDERR (last 2000 chars): {result_eval.stderr[-2000:]}")
-                experiment['status'] = 'failed_eval'
-                experiment['error'] = result_eval.stderr[-2000:]
-            else:
-                experiment['status'] = 'success'
+            experiment['status'] = 'success'
+            print("Pipeline completed successfully")
 
     except subprocess.TimeoutExpired:
         experiment['status'] = 'timeout'
@@ -872,7 +810,7 @@ def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
         result_keys.update(exp['results'].keys())
 
     # Build header
-    base_columns = ['exp_idx', 'run_name', 'status', 'duration_seconds', 'locate_time_seconds', 'edit_time_seconds', 'gpu_id']
+    base_columns = ['exp_idx', 'run_name', 'status', 'duration_seconds', 'gpu_id']
     config_columns = sorted(config_keys)
     result_columns = sorted(result_keys)
     all_columns = base_columns + config_columns + result_columns
@@ -888,8 +826,6 @@ def save_summary_csv(experiments: List[Dict[str, Any]], output_path: Path):
                 'run_name': exp['run_name'],
                 'status': exp['status'],
                 'duration_seconds': exp.get('duration_seconds'),
-                'locate_time_seconds': exp.get('locate_time_seconds'),
-                'edit_time_seconds': exp.get('edit_time_seconds'),
                 'gpu_id': exp.get('gpu_id'),
             }
             # Add config values
