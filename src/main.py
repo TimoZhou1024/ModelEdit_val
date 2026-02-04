@@ -1212,8 +1212,8 @@ def run_full_pipeline(args):
         astra_layers = locator.get_top_layers(n=args.num_edit_layers)
         print(f"\nASTRA top {args.num_edit_layers} layers: {astra_layers}")
 
-    # Stage 4: Editing (pass ASTRA layers)
-    editor = run_edit_stage(args, trainer, data_handler, misclassified, astra_layers=astra_layers)
+    # Stage 4: Editing (re-find misclassified using max_edits; pass ASTRA layers only)
+    editor = run_edit_stage(args, trainer, data_handler, misclassified=None, astra_layers=astra_layers)
     
     # Stage 5: Evaluation
     evaluator = run_eval_stage(args, trainer, data_handler, editor.model if editor else None)
