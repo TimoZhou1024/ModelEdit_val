@@ -327,7 +327,7 @@ Both baselines use the same evaluation framework:
 | `--edit-layers` | None | Manually specify layers to edit (e.g., `9 10 11`) |
 | `--num-edit-layers` | 3 | Number of top ASTRA layers to edit |
 | `--no-astra-layers` | False | Disable ASTRA layer selection, use default [9,10,11] |
-| `--max-edits` | 30 | Maximum samples to edit |
+| `--max-edits` | 30 | Maximum samples to edit (or `all`/`*` for no limit) |
 | `--projection-samples` | 500 | Number of FT-Train samples for projection matrix construction |
 | `--nullspace-threshold` | 1e-2 | Threshold for null-space eigenvalue selection |
 

@@ -176,9 +176,9 @@ def main():
     )
     parser.add_argument(
         "--max-edits",
-        type=int,
-        default=30,
-        help="Maximum number of error samples to use (default: 30)"
+        type=str,
+        default="30",
+        help="Maximum number of error samples to use, or 'all' for no limit (default: 30)"
     )
     parser.add_argument(
         "--run-prefix",

@@ -186,9 +186,9 @@ Examples:
     )
     parser.add_argument(
         "--max-edits",
-        type=int,
-        default=30,
-        help="Max number of samples to edit (default: 30)"
+        type=str,
+        default="30",
+        help="Max number of samples to edit, or 'all' for no limit (default: 30)"
     )
     parser.add_argument(
         "--projection-samples",
@@ -545,7 +545,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         true_labels=edit_labels,
         sample_indices=edit_indices_list,
         device=device,
-        desc="Before Edit"
+        desc="Before Edit",
+        batch_size=args.batch_size
     )
     print(f"  Edit samples accuracy BEFORE: {results_before['accuracy']*100:.1f}% "
           f"({results_before['num_correct']}/{results_before['num_total']})")
@@ -1230,6 +1231,12 @@ def run_full_pipeline(args):
 def main():
     """Main entry point."""
     args = parse_args()
+
+    # Normalize max_edits (allow special 'all')
+    if isinstance(args.max_edits, str) and args.max_edits.lower() in {"all", "*"}:
+        args.max_edits = None
+    else:
+        args.max_edits = int(args.max_edits)
 
     # Apply timestamp or run name to output directories
     if args.run_name:

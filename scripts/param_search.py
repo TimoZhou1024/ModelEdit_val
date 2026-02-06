@@ -141,10 +141,10 @@ def parse_args():
 
     parser.add_argument(
         "--max-edits-range",
-        type=int,
+        type=str,
         nargs="+",
-        default=[10, 20, 30, 50],
-        help="Values for --max-edits to search (default: [10,20,30,50])"
+        default=["10", "20", "30", "50"],
+        help="Values for --max-edits to search (default: [10,20,30,50], or 'all')"
     )
 
     parser.add_argument(
@@ -324,10 +324,16 @@ def build_experiment_configs(args) -> List[Dict[str, Any]]:
     """Build list of experiment configurations to run."""
     configs = []
 
+    def normalize_max_edits(value: str) -> Any:
+        if isinstance(value, str) and value.lower() in {"all", "*"}:
+            return "all"
+        return int(value)
+
     for dataset in args.datasets:
         for proj_samples in args.projection_samples_range:
             for threshold in args.nullspace_threshold_range:
                 for max_edits in args.max_edits_range:
+                    max_edits = normalize_max_edits(max_edits)
                     # ASTRA-based experiments
                     astra_layers = [n for n in args.num_edit_layers_range if n > 0]
                     for num_layers in astra_layers:

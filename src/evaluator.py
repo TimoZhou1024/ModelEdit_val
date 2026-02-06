@@ -765,7 +765,8 @@ def evaluate_edit_samples(
     true_labels: torch.Tensor,
     sample_indices: List[int],
     device: torch.device = None,
-    desc: str = "Edit Samples"
+    desc: str = "Edit Samples",
+    batch_size: int = 128
 ) -> Dict[str, Any]:
     """
     Evaluate model performance on specific edit samples.
@@ -792,18 +793,28 @@ def evaluate_edit_samples(
     model.eval()
     model.to(device)
 
-    images = images.to(device)
-    true_labels = true_labels.to(device)
+    if batch_size is None or batch_size <= 0:
+        batch_size = len(images)
+
+    predictions_list = []
+    probs_list = []
 
     with torch.no_grad():
-        outputs = model(images)
-        logits = outputs.logits
-        probs = torch.softmax(logits, dim=-1)
-        predictions = logits.argmax(dim=1)
+        for start in range(0, len(images), batch_size):
+            end = start + batch_size
+            batch_images = images[start:end].to(device)
 
-    predictions = predictions.cpu().numpy()
+            outputs = model(batch_images)
+            logits = outputs.logits
+            probs = torch.softmax(logits, dim=-1)
+            predictions = logits.argmax(dim=1)
+
+            predictions_list.append(predictions.cpu().numpy())
+            probs_list.append(probs.cpu().numpy())
+
+    predictions = np.concatenate(predictions_list, axis=0)
+    probs_np = np.concatenate(probs_list, axis=0)
     true_labels_np = true_labels.cpu().numpy()
-    probs_np = probs.cpu().numpy()
 
     correct = predictions == true_labels_np
     accuracy = correct.mean()
