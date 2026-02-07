@@ -24,6 +24,8 @@ Supported Datasets:
 import argparse
 import sys
 import os
+import time
+import csv
 from pathlib import Path
 from datetime import datetime
 
@@ -286,6 +288,24 @@ Examples:
     )
 
     return parser.parse_args()
+
+
+def export_timing_metrics(results_dir: str, duration_seconds: float, edit_seconds: float | None) -> None:
+    """Export timing metrics to results_dir/timing.csv."""
+    results_path = Path(results_dir)
+    results_path.mkdir(parents=True, exist_ok=True)
+    timing_path = results_path / "timing.csv"
+
+    rows = [
+        {"metric": "duration_seconds", "value": duration_seconds, "notes": "total stage duration"},
+        {"metric": "edit_seconds", "value": edit_seconds, "notes": "edit stage duration"},
+    ]
+
+    with open(timing_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["metric", "value", "notes"])
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def run_data_stage(args):
@@ -719,7 +739,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         true_labels=edit_labels,
         sample_indices=edit_indices_list,
         device=device,
-        desc="After Edit"
+        desc="After Edit",
+        batch_size=args.batch_size
     )
     print(f"  Edit samples accuracy AFTER: {results_after['accuracy']*100:.1f}% "
           f"({results_after['num_correct']}/{results_after['num_total']})")
@@ -1214,7 +1235,9 @@ def run_full_pipeline(args):
         print(f"\nASTRA top {args.num_edit_layers} layers: {astra_layers}")
 
     # Stage 4: Editing (re-find misclassified using max_edits; pass ASTRA layers only)
+    edit_start = time.time()
     editor = run_edit_stage(args, trainer, data_handler, misclassified=None, astra_layers=astra_layers)
+    edit_seconds = time.time() - edit_start
     
     # Stage 5: Evaluation
     evaluator = run_eval_stage(args, trainer, data_handler, editor.model if editor else None)
@@ -1226,6 +1249,8 @@ def run_full_pipeline(args):
     print(f"  Checkpoints: {args.checkpoint_dir}/")
     print(f"  Logs: {args.log_dir}/")
     print(f"  Results: {args.results_dir}/")
+
+    return edit_seconds
 
 
 def main():
@@ -1278,6 +1303,9 @@ def main():
     else:
         args.pin_memory = None  # Auto-detect based on CUDA availability
     
+    start_time = time.time()
+    edit_seconds = None
+
     # Run selected stage
     if args.stage == "data":
         run_data_stage(args)
@@ -1286,11 +1314,13 @@ def main():
     elif args.stage == "locate":
         run_locate_stage(args)
     elif args.stage == "edit":
+        edit_start = time.time()
         run_edit_stage(args)
+        edit_seconds = time.time() - edit_start
     elif args.stage == "eval":
         run_eval_stage(args)
     elif args.stage == "full":
-        run_full_pipeline(args)
+        edit_seconds = run_full_pipeline(args)
     elif args.stage == "baseline1":
         run_baseline1_stage(args)
     elif args.stage == "baseline2":
@@ -1298,6 +1328,12 @@ def main():
     else:
         print(f"Unknown stage: {args.stage}")
         sys.exit(1)
+
+    duration_seconds = time.time() - start_time
+    if args.stage in {"edit", "full"}:
+        export_timing_metrics(args.results_dir, duration_seconds, edit_seconds)
+    elif args.stage in {"baseline1", "baseline2"}:
+        export_timing_metrics(args.results_dir, duration_seconds, duration_seconds)
 
 
 if __name__ == "__main__":

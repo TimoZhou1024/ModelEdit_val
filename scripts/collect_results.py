@@ -263,6 +263,13 @@ def extract_core_metrics(results_dir: Path, log_dir: Path = None, run_name: str 
         metrics['discovery_acc_after'] = disc_data.get('accuracy_edit')
         metrics['discovery_acc_delta'] = disc_data.get('accuracy_delta')
 
+    # === Timing Metrics ===
+    timing_csv = results_dir / "timing.csv"
+    if timing_csv.exists():
+        timing_data = parse_metric_csv(timing_csv)
+        metrics['duration_seconds'] = timing_data.get('duration_seconds')
+        metrics['edit_seconds'] = timing_data.get('edit_seconds')
+
     # === Extract actual edited layers from edit_log.csv ===
     if log_dir is not None and run_name is not None:
         edit_layers = extract_edit_layers_from_log(log_dir, run_name)
@@ -449,6 +456,8 @@ def main():
         'proj_num_broken', 'proj_num_fixed',
         # Discovery set
         'discovery_total', 'discovery_acc_before', 'discovery_acc_after', 'discovery_acc_delta',
+        # Timing
+        'duration_seconds', 'edit_seconds',
     ]
 
     all_columns = config_columns + metric_columns

@@ -608,6 +608,7 @@ results/{dataset}/
 │   ├── comparative_evaluation_projection_samples.csv
 │   ├── comparative_evaluation_test_set.csv
 │   └── comparative_evaluation_edit_discovery_set.csv
+│   └── timing.csv                               # duration_seconds/edit_seconds
 ├── baseline_retrain_edit{M}/                     # Baseline 1 results
 │   └── baseline_retrain_summary.csv
 └── baseline_finetune_errors_edit{M}/             # Baseline 2 results
@@ -624,8 +625,8 @@ results/{dataset}/
 The parameter search collects these key metrics for each experiment:
 
 **Timing:**
-- `edit_time_seconds`: Time for edit/training stage only (excludes eval and error sample selection)
-- `duration_seconds`: Total time including all stages
+- `edit_seconds`: Edit/training stage wall-clock time (excludes eval; includes data/IO inside edit stage)
+- `duration_seconds`: Total wall-clock time for the run (all stages)
 
 **Edit Performance** (on error samples used for editing):
 - `edit_total_wrong`: Total error samples edited

@@ -446,6 +446,15 @@ def parse_results(results_dir: Path, log_dir: Path = None, run_name: str = None)
         for metric, value in metrics.items():
             results[f'{prefix}_{metric}'] = value
 
+    # Timing metrics (duration/edit)
+    timing_csv = results_dir / "timing.csv"
+    if timing_csv.exists():
+        timing_metrics = parse_metric_csv(timing_csv)
+        if 'duration_seconds' in timing_metrics:
+            results['duration_seconds'] = timing_metrics.get('duration_seconds')
+        if 'edit_seconds' in timing_metrics:
+            results['edit_seconds'] = timing_metrics.get('edit_seconds')
+
     # Extract actual edited layers from edit_log.csv if log_dir provided
     if log_dir is not None and run_name is not None:
         edit_layers = extract_edit_layers(log_dir, run_name)
