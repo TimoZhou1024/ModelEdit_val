@@ -244,6 +244,7 @@ Runs **Comparative Evaluation** on **Official Test Set** (4-Set Protocol):
 - Compares Pre-Edit vs Post-Edit model performance
 - **Metrics**:
   - **Accuracy Delta**: Change in accuracy (positive = improvement)
+  - **AUC**: Area Under ROC Curve (weighted OVR for multi-class, binary for 2-class)
   - **Stability**: Fraction of correct samples that remained correct
   - **Fix Rate**: Fraction of error samples that became correct
   - **Regression Rate**: Fraction of correct samples that became wrong
@@ -500,8 +501,8 @@ Official MedMNIST Data
 ┌─────────────────────────────────────────────┐
 │  Stage 5: Comparative Evaluation            │
 │  Test on Official Test Set                  │
-│  Metrics: Accuracy Delta, Stability,        │
-│           Fix Rate, Regression Rate         │
+│  Metrics: Accuracy Delta, AUC,              │
+│           Stability, Fix Rate, Regression   │
 └─────────────────────────────────────────────┘
 ```
 
@@ -661,12 +662,15 @@ The parameter search collects these key metrics for each experiment:
 - `test_total`: Total test samples
 - `test_acc_before` / `test_acc_after`: Accuracy before/after editing
 - `test_acc_delta`: Accuracy change (+improvement, -regression)
+- `test_auc_before` / `test_auc_after`: AUC before/after editing
+- `test_auc_delta`: AUC change
 - `test_correct_to_wrong`: Regressions (correct → wrong)
 - `test_wrong_to_correct`: Fixes (wrong → correct)
 
 **Projection Stability** (on FT-Train samples):
 - `proj_stability`: Fraction of correct samples preserved
 - `proj_regression_rate`: Fraction of correct samples broken
+- `proj_auc_before` / `proj_auc_after`: AUC before/after editing
 
 ### Recommended Search Strategy
 
@@ -803,12 +807,24 @@ All experiments log these metrics to W&B:
 | Metric | Description |
 |--------|-------------|
 | `test/accuracy_delta` | Test set accuracy improvement (primary) |
+| `test/auc_delta` | Test set AUC improvement |
 | `test/stability` | Fraction of correct samples preserved |
 | `edit/fix_rate` | Fraction of target errors corrected |
 | `proj/stability` | FT-Train stability (forgetting metric) |
 | `timing/edit_seconds` | Edit stage duration |
 
 ## Changelog
+
+### v1.11.0 (2026-02-12)
+- **AUC Metric**: Added AUC (Area Under ROC Curve) alongside ACC across all evaluation functions
+  - Binary datasets (liver2s, liver2a): Standard binary AUC using positive class probability
+  - Multi-class datasets (pathmnist, dermamnist, etc.): Weighted One-vs-Rest AUC
+  - Safe handling of edge cases (single class present → returns N/A)
+- **Evaluation Functions Updated**: `evaluate_comparative()`, `evaluate_edit_samples()`, `evaluate_projection_samples()`, `evaluate_baseline_4level()`, `evaluate_before_after()`
+- **CSV Exports Updated**: All comparative evaluation CSVs now include `auc_orig`, `auc_edit`, `auc_delta`
+- **Console Output Updated**: AUC Before/After/Delta printed alongside accuracy in all summary tables
+- **Downstream Scripts Updated**: `param_search.py`, `wandb_sweep.py`, `collect_results.py` all collect and log AUC metrics
+- **W&B Metrics**: Added `test/auc_before`, `test/auc_after`, `test/auc_delta`
 
 ### v1.10.0 (2026-02-12)
 - **Multi-Model Support**: Added `--model` CLI argument to select model architecture

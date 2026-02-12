@@ -608,6 +608,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
     )
     print(f"  Edit samples accuracy BEFORE: {results_before['accuracy']*100:.1f}% "
           f"({results_before['num_correct']}/{results_before['num_total']})")
+    if results_before.get('auc') is not None:
+        print(f"  Edit samples AUC BEFORE: {results_before['auc']:.4f}")
 
     edit_seconds = None
 
@@ -715,6 +717,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
             )
             print(f"  Projection samples accuracy BEFORE: {proj_results_before['accuracy']*100:.2f}% "
                   f"({proj_results_before['num_correct']}/{proj_results_before['num_total']})")
+            if proj_results_before.get('auc') is not None:
+                print(f"  Projection samples AUC BEFORE: {proj_results_before['auc']:.4f}")
         else:
             proj_results_before = None
 
@@ -774,6 +778,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
             )
             print(f"  Projection samples accuracy AFTER: {proj_results_after['accuracy']*100:.2f}% "
                   f"({proj_results_after['num_correct']}/{proj_results_after['num_total']})")
+            if proj_results_after.get('auc') is not None:
+                print(f"  Projection samples AUC AFTER: {proj_results_after['auc']:.4f}")
 
             # Compare and print detailed results
             proj_comparison = compare_projection_samples_before_after(
@@ -807,6 +813,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
     )
     print(f"  Edit samples accuracy AFTER: {results_after['accuracy']*100:.1f}% "
           f"({results_after['num_correct']}/{results_after['num_total']})")
+    if results_after.get('auc') is not None:
+        print(f"  Edit samples AUC AFTER: {results_after['auc']:.4f}")
 
     # ================================================================
     # Compare before/after and print detailed results

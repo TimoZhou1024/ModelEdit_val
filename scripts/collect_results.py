@@ -219,6 +219,9 @@ def extract_core_metrics(results_dir: Path, log_dir: Path = None, run_name: str 
         metrics['edit_num_broken'] = edit_data.get('num_broken')
         metrics['edit_acc_before'] = edit_data.get('accuracy_before')
         metrics['edit_acc_after'] = edit_data.get('accuracy_after')
+        metrics['edit_auc_before'] = edit_data.get('auc_before')
+        metrics['edit_auc_after'] = edit_data.get('auc_after')
+        metrics['edit_auc_delta'] = edit_data.get('auc_delta')
 
     # === Projection Samples Metrics (FT-Train stability) ===
     proj_csv = results_dir / "comparative_evaluation_projection_samples.csv"
@@ -231,6 +234,9 @@ def extract_core_metrics(results_dir: Path, log_dir: Path = None, run_name: str 
         metrics['proj_regression_rate'] = proj_data.get('regression_rate')
         metrics['proj_num_broken'] = proj_data.get('num_broken')
         metrics['proj_num_fixed'] = proj_data.get('num_fixed')
+        metrics['proj_auc_before'] = proj_data.get('auc_before')
+        metrics['proj_auc_after'] = proj_data.get('auc_after')
+        metrics['proj_auc_delta'] = proj_data.get('auc_delta')
 
     # === Test Set Metrics ===
     test_csv = results_dir / "comparative_evaluation_test_set.csv"
@@ -244,6 +250,9 @@ def extract_core_metrics(results_dir: Path, log_dir: Path = None, run_name: str 
         metrics['test_acc_before'] = test_data.get('accuracy_orig')
         metrics['test_acc_after'] = test_data.get('accuracy_edit')
         metrics['test_acc_delta'] = test_data.get('accuracy_delta')
+        metrics['test_auc_before'] = test_data.get('auc_orig')
+        metrics['test_auc_after'] = test_data.get('auc_edit')
+        metrics['test_auc_delta'] = test_data.get('auc_delta')
         metrics['test_correct_before'] = test_data.get('n_correct_orig')
         metrics['test_correct_after'] = test_data.get('n_correct_edit')
         metrics['test_errors_before'] = test_data.get('n_error_orig')
@@ -262,6 +271,9 @@ def extract_core_metrics(results_dir: Path, log_dir: Path = None, run_name: str 
         metrics['discovery_acc_before'] = disc_data.get('accuracy_orig')
         metrics['discovery_acc_after'] = disc_data.get('accuracy_edit')
         metrics['discovery_acc_delta'] = disc_data.get('accuracy_delta')
+        metrics['discovery_auc_before'] = disc_data.get('auc_orig')
+        metrics['discovery_auc_after'] = disc_data.get('auc_edit')
+        metrics['discovery_auc_delta'] = disc_data.get('auc_delta')
 
     # === Timing Metrics ===
     timing_csv = results_dir / "timing.csv"
@@ -445,17 +457,21 @@ def main():
         # Edit performance
         'edit_total_wrong', 'edit_num_fixed', 'edit_fix_ratio',
         'edit_num_broken', 'edit_acc_before', 'edit_acc_after',
+        'edit_auc_before', 'edit_auc_after', 'edit_auc_delta',
         # Test set performance
         'test_total', 'test_acc_before', 'test_acc_after', 'test_acc_delta',
+        'test_auc_before', 'test_auc_after', 'test_auc_delta',
         'test_correct_before', 'test_correct_after',
         'test_errors_before', 'test_errors_after',
         'test_correct_to_wrong', 'test_wrong_to_correct',
         # Projection stability
         'proj_total', 'proj_acc_before', 'proj_acc_after',
+        'proj_auc_before', 'proj_auc_after', 'proj_auc_delta',
         'proj_stability', 'proj_regression_rate',
         'proj_num_broken', 'proj_num_fixed',
         # Discovery set
         'discovery_total', 'discovery_acc_before', 'discovery_acc_after', 'discovery_acc_delta',
+        'discovery_auc_before', 'discovery_auc_after', 'discovery_auc_delta',
         # Timing
         'duration_seconds', 'edit_seconds',
     ]

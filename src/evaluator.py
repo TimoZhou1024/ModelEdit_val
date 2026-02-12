@@ -20,10 +20,47 @@ from sklearn.metrics import (
     confusion_matrix,
     classification_report,
     accuracy_score,
-    precision_recall_fscore_support
+    precision_recall_fscore_support,
+    roc_auc_score
 )
 import seaborn as sns
 import matplotlib.pyplot as plt
+
+
+def compute_auc_safe(true_labels, probs, num_classes=None):
+    """
+    Safely compute AUC, handling binary/multi-class and edge cases.
+
+    Args:
+        true_labels: Ground truth labels (N,)
+        probs: Prediction probabilities (N, C)
+        num_classes: Number of classes. Inferred from probs.shape[1] if None.
+
+    Returns:
+        AUC score (float) or None if computation is not possible.
+    """
+    unique = np.unique(true_labels)
+    if len(unique) < 2:
+        return None
+    if num_classes is None:
+        num_classes = probs.shape[1]
+    # Handle NaN/inf in probabilities (can occur with collapsed models)
+    if not np.all(np.isfinite(probs)):
+        probs = np.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
+        # Re-normalize rows to sum to 1
+        row_sums = probs.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums == 0, 1.0, row_sums)
+        probs = probs / row_sums
+    try:
+        if num_classes == 2:
+            return float(roc_auc_score(true_labels, probs[:, 1]))
+        else:
+            return float(roc_auc_score(
+                true_labels, probs, multi_class='ovr', average='weighted',
+                labels=list(range(num_classes))
+            ))
+    except ValueError:
+        return None
 
 
 class Evaluator:
@@ -157,9 +194,13 @@ class Evaluator:
         errors = self.predictions != self.true_labels
         error_rate = errors.mean()
         error_indices = np.where(errors)[0]
-        
+
+        # AUC
+        auc = compute_auc_safe(self.true_labels, self.probabilities)
+
         return {
             'accuracy': accuracy,
+            'auc': auc,
             'error_rate': error_rate,
             'num_errors': len(error_indices),
             'total_samples': len(self.predictions),
@@ -530,10 +571,17 @@ def evaluate_before_after(
     eval_after.print_summary()
 
     # Comparison with multiple success criteria
+    auc_before = metrics_before.get('auc')
+    auc_after = metrics_after.get('auc')
+    auc_change = (auc_after - auc_before) if (auc_before is not None and auc_after is not None) else None
+
     comparison = {
         'accuracy_before': metrics_before['accuracy'],
         'accuracy_after': metrics_after['accuracy'],
         'accuracy_change': metrics_after['accuracy'] - metrics_before['accuracy'],
+        'auc_before': auc_before,
+        'auc_after': auc_after,
+        'auc_change': auc_change,
         'macro_f1_before': metrics_before['macro']['f1'],
         'macro_f1_after': metrics_after['macro']['f1'],
         'macro_f1_change': metrics_after['macro']['f1'] - metrics_before['macro']['f1'],
@@ -556,6 +604,9 @@ def evaluate_before_after(
           f"({comparison['macro_f1_change']:+.4f})")
     print(f"Errors: {comparison['errors_before']} → {comparison['errors_after']} "
           f"({comparison['errors_fixed']:+d} fixed)")
+
+    if auc_before is not None and auc_after is not None:
+        print(f"AUC:      {auc_before:.4f} → {auc_after:.4f} ({auc_change:+.4f})")
 
     # Highlight pass/fail style indicators
     print("\nJudgment Indicators:")
@@ -645,11 +696,18 @@ def evaluate_comparative(
     all_labels = np.array(all_labels)
     preds_orig = np.array(preds_orig)
     preds_edit = np.array(preds_edit)
+    probs_orig = np.array(probs_orig)
+    probs_edit = np.array(probs_edit)
 
     # Compute basic accuracy metrics
     acc_orig = accuracy_score(all_labels, preds_orig)
     acc_edit = accuracy_score(all_labels, preds_edit)
     accuracy_delta = acc_edit - acc_orig
+
+    # Compute AUC
+    auc_orig = compute_auc_safe(all_labels, probs_orig)
+    auc_edit = compute_auc_safe(all_labels, probs_edit)
+    auc_delta = (auc_edit - auc_orig) if (auc_orig is not None and auc_edit is not None) else None
 
     # Compute stability and fix rate
     correct_orig = (preds_orig == all_labels)
@@ -686,6 +744,9 @@ def evaluate_comparative(
         'accuracy_orig': acc_orig,
         'accuracy_edit': acc_edit,
         'accuracy_delta': accuracy_delta,
+        'auc_orig': auc_orig,
+        'auc_edit': auc_edit,
+        'auc_delta': auc_delta,
         'stability': stability,
         'fix_rate': fix_rate,
         'regression_rate': regression_rate,
@@ -708,6 +769,12 @@ def evaluate_comparative(
     print(f"  Post-Edit: {acc_edit*100:.2f}% ({n_correct_edit}/{n_total})")
     print(f"  Delta:     {accuracy_delta*100:+.2f}%")
 
+    if auc_orig is not None and auc_edit is not None:
+        print(f"\nAUC:")
+        print(f"  Pre-Edit:  {auc_orig:.4f}")
+        print(f"  Post-Edit: {auc_edit:.4f}")
+        print(f"  Delta:     {auc_delta:+.4f}")
+
     print(f"\nTransition Analysis:")
     print(f"  Stability (correct->correct): {stability*100:.1f}% ({n_stable}/{n_correct_orig})")
     print(f"  Fix Rate (error->correct):    {fix_rate*100:.1f}% ({n_fixed}/{n_error_orig})")
@@ -724,6 +791,9 @@ def evaluate_comparative(
         {'metric': 'accuracy_orig', 'value': acc_orig, 'notes': f'{acc_orig*100:.2f}%'},
         {'metric': 'accuracy_edit', 'value': acc_edit, 'notes': f'{acc_edit*100:.2f}%'},
         {'metric': 'accuracy_delta', 'value': accuracy_delta, 'notes': f'{accuracy_delta*100:+.2f}%'},
+        {'metric': 'auc_orig', 'value': auc_orig if auc_orig is not None else '', 'notes': f'{auc_orig:.4f}' if auc_orig is not None else 'N/A'},
+        {'metric': 'auc_edit', 'value': auc_edit if auc_edit is not None else '', 'notes': f'{auc_edit:.4f}' if auc_edit is not None else 'N/A'},
+        {'metric': 'auc_delta', 'value': auc_delta if auc_delta is not None else '', 'notes': f'{auc_delta:+.4f}' if auc_delta is not None else 'N/A'},
         {'metric': 'stability', 'value': stability, 'notes': f'{n_stable}/{n_correct_orig}'},
         {'metric': 'fix_rate', 'value': fix_rate, 'notes': f'{n_fixed}/{n_error_orig}'},
         {'metric': 'regression_rate', 'value': regression_rate, 'notes': f'{n_regressed}/{n_correct_orig}'},
@@ -818,6 +888,7 @@ def evaluate_edit_samples(
 
     correct = predictions == true_labels_np
     accuracy = correct.mean()
+    auc = compute_auc_safe(true_labels_np, probs_np)
 
     # Per-sample detailed info
     per_sample_info = []
@@ -837,6 +908,7 @@ def evaluate_edit_samples(
         'probabilities': probs_np,
         'correct': correct,
         'accuracy': accuracy,
+        'auc': auc,
         'num_correct': int(correct.sum()),
         'num_total': len(predictions),
         'per_sample_info': per_sample_info
@@ -894,10 +966,17 @@ def compare_edit_samples_before_after(
             'status': status
         })
 
+    auc_before = results_before.get('auc')
+    auc_after = results_after.get('auc')
+    auc_delta = (auc_after - auc_before) if (auc_before is not None and auc_after is not None) else None
+
     comparison = {
         'accuracy_before': results_before['accuracy'],
         'accuracy_after': results_after['accuracy'],
         'accuracy_delta': results_after['accuracy'] - results_before['accuracy'],
+        'auc_before': auc_before,
+        'auc_after': auc_after,
+        'auc_delta': auc_delta,
         'num_fixed': int(fixed.sum()),
         'num_broken': int(broken.sum()),
         'num_stayed_correct': int(stayed_correct.sum()),
@@ -930,6 +1009,14 @@ def print_edit_samples_comparison(
     print(f"  Accuracy After:  {comparison['accuracy_after']*100:.1f}% "
           f"({results_after['num_correct']}/{results_after['num_total']})")
     print(f"  Accuracy Change: {comparison['accuracy_delta']*100:+.1f}%")
+
+    auc_before = comparison.get('auc_before')
+    auc_after = comparison.get('auc_after')
+    auc_delta = comparison.get('auc_delta')
+    if auc_before is not None and auc_after is not None:
+        print(f"  AUC Before:      {auc_before:.4f}")
+        print(f"  AUC After:       {auc_after:.4f}")
+        print(f"  AUC Change:      {auc_delta:+.4f}")
 
     print(f"\nTransition Analysis:")
     print(f"  FIXED (wrong->correct):    {comparison['num_fixed']} samples")
@@ -1037,6 +1124,7 @@ def evaluate_projection_samples(
 
     correct = predictions == true_labels_np
     accuracy = correct.mean()
+    auc = compute_auc_safe(true_labels_np, probs_np)
 
     # Class distribution
     unique_classes, class_counts = np.unique(true_labels_np, return_counts=True)
@@ -1067,6 +1155,7 @@ def evaluate_projection_samples(
         'probabilities': probs_np,
         'correct': correct,
         'accuracy': accuracy,
+        'auc': auc,
         'num_correct': int(correct.sum()),
         'num_total': num_samples,
         'class_distribution': class_distribution,
@@ -1124,10 +1213,17 @@ def compare_projection_samples_before_after(
             'broken': int((cls_correct_before & ~cls_correct_after).sum())
         }
 
+    auc_before = results_before.get('auc')
+    auc_after = results_after.get('auc')
+    auc_delta = (auc_after - auc_before) if (auc_before is not None and auc_after is not None) else None
+
     comparison = {
         'accuracy_before': results_before['accuracy'],
         'accuracy_after': results_after['accuracy'],
         'accuracy_delta': results_after['accuracy'] - results_before['accuracy'],
+        'auc_before': auc_before,
+        'auc_after': auc_after,
+        'auc_delta': auc_delta,
         'num_fixed': int(fixed.sum()),
         'num_broken': int(broken.sum()),  # This is REGRESSION - should be minimal!
         'num_stayed_correct': int(stayed_correct.sum()),
@@ -1169,6 +1265,14 @@ def print_projection_samples_comparison(
     print(f"  Accuracy After:  {comparison['accuracy_after']*100:.2f}% "
           f"({results_after['num_correct']}/{results_after['num_total']})")
     print(f"  Accuracy Change: {comparison['accuracy_delta']*100:+.2f}%")
+
+    auc_before = comparison.get('auc_before')
+    auc_after = comparison.get('auc_after')
+    auc_delta = comparison.get('auc_delta')
+    if auc_before is not None and auc_after is not None:
+        print(f"  AUC Before:      {auc_before:.4f}")
+        print(f"  AUC After:       {auc_after:.4f}")
+        print(f"  AUC Change:      {auc_delta:+.4f}")
 
     print(f"\nKnowledge Preservation Analysis:")
     print(f"  Stability (correct->correct): {comparison['stability']*100:.1f}% "
@@ -1260,6 +1364,16 @@ def export_edit_samples_comparison(
          'notes': f"{comparison['break_rate']*100:.1f}%"},
     ]
 
+    auc_before = comparison.get('auc_before')
+    auc_after = comparison.get('auc_after')
+    auc_delta = comparison.get('auc_delta')
+    if auc_before is not None:
+        summary_rows.append({'metric': 'auc_before', 'value': auc_before, 'notes': f'{auc_before:.4f}'})
+    if auc_after is not None:
+        summary_rows.append({'metric': 'auc_after', 'value': auc_after, 'notes': f'{auc_after:.4f}'})
+    if auc_delta is not None:
+        summary_rows.append({'metric': 'auc_delta', 'value': auc_delta, 'notes': f'{auc_delta:+.4f}'})
+
     df_summary = pd.DataFrame(summary_rows)
     summary_path = results_dir / 'comparative_evaluation_edit_samples.csv'
     df_summary.to_csv(summary_path, index=False)
@@ -1324,6 +1438,16 @@ def export_projection_samples_comparison(
          'notes': f"{comparison['regression_rate']*100:.1f}% (correct samples broken)"},
     ]
 
+    auc_before = comparison.get('auc_before')
+    auc_after = comparison.get('auc_after')
+    auc_delta = comparison.get('auc_delta')
+    if auc_before is not None:
+        summary_rows.append({'metric': 'auc_before', 'value': auc_before, 'notes': f'{auc_before:.4f}'})
+    if auc_after is not None:
+        summary_rows.append({'metric': 'auc_after', 'value': auc_after, 'notes': f'{auc_after:.4f}'})
+    if auc_delta is not None:
+        summary_rows.append({'metric': 'auc_delta', 'value': auc_delta, 'notes': f'{auc_delta:+.4f}'})
+
     df_summary = pd.DataFrame(summary_rows)
     summary_path = results_dir / 'comparative_evaluation_projection_samples.csv'
     df_summary.to_csv(summary_path, index=False)
@@ -1372,6 +1496,9 @@ def export_baseline_summary(
             'value': es.get('accuracy_delta', 0),
             'before': es.get('accuracy_before', 0),
             'after': es.get('accuracy_after', 0),
+            'auc_before': es.get('auc_before', ''),
+            'auc_after': es.get('auc_after', ''),
+            'auc_delta': es.get('auc_delta', ''),
             'notes': f"Fixed: {es.get('num_fixed', 0)}, Broken: {es.get('num_broken', 0)}"
         })
 
@@ -1384,6 +1511,9 @@ def export_baseline_summary(
             'value': ft.get('accuracy_delta', 0),
             'before': ft.get('accuracy_orig', 0),
             'after': ft.get('accuracy_edit', 0),
+            'auc_before': ft.get('auc_orig', ''),
+            'auc_after': ft.get('auc_edit', ''),
+            'auc_delta': ft.get('auc_delta', ''),
             'notes': f"Stability: {ft.get('stability', 0)*100:.1f}%"
         })
 
@@ -1396,6 +1526,9 @@ def export_baseline_summary(
             'value': ts.get('accuracy_delta', 0),
             'before': ts.get('accuracy_orig', 0),
             'after': ts.get('accuracy_edit', 0),
+            'auc_before': ts.get('auc_orig', ''),
+            'auc_after': ts.get('auc_edit', ''),
+            'auc_delta': ts.get('auc_delta', ''),
             'notes': f"Regression: {ts.get('regression_rate', 0)*100:.1f}%"
         })
 
@@ -1408,6 +1541,9 @@ def export_baseline_summary(
             'value': ed.get('accuracy_delta', 0),
             'before': ed.get('accuracy_orig', 0),
             'after': ed.get('accuracy_edit', 0),
+            'auc_before': ed.get('auc_orig', ''),
+            'auc_after': ed.get('auc_edit', ''),
+            'auc_delta': ed.get('auc_delta', ''),
             'notes': f"Fix rate: {ed.get('fix_rate', 0)*100:.1f}%"
         })
 
@@ -1527,28 +1663,40 @@ def evaluate_baseline_4level(
     print("\n" + "=" * 70)
     print(f"BASELINE {baseline_name.upper()} - FINAL SUMMARY")
     print("=" * 70)
-    print(f"\n{'Level':<25} {'Acc Before':>12} {'Acc After':>12} {'Delta':>10}")
-    print("-" * 60)
+
+    def _fmt_auc(val):
+        return f"{val:.4f}" if val is not None else "  N/A "
+
+    print(f"\n{'Level':<25} {'Acc Before':>12} {'Acc After':>12} {'Delta':>10} {'AUC Before':>12} {'AUC After':>12} {'AUC Delta':>11}")
+    print("-" * 95)
 
     if 'edit_samples' in all_results:
         es = all_results['edit_samples']
         print(f"{'Edit Samples':<25} {es['accuracy_before']*100:>11.2f}% "
-              f"{es['accuracy_after']*100:>11.2f}% {es['accuracy_delta']*100:>+9.2f}%")
+              f"{es['accuracy_after']*100:>11.2f}% {es['accuracy_delta']*100:>+9.2f}%"
+              f" {_fmt_auc(es.get('auc_before')):>12} {_fmt_auc(es.get('auc_after')):>12}"
+              f" {_fmt_auc(es.get('auc_delta')):>11}")
 
     if 'ft_train_samples' in all_results:
         ft = all_results['ft_train_samples']
         print(f"{'FT-Train Samples':<25} {ft['accuracy_orig']*100:>11.2f}% "
-              f"{ft['accuracy_edit']*100:>11.2f}% {ft['accuracy_delta']*100:>+9.2f}%")
+              f"{ft['accuracy_edit']*100:>11.2f}% {ft['accuracy_delta']*100:>+9.2f}%"
+              f" {_fmt_auc(ft.get('auc_orig')):>12} {_fmt_auc(ft.get('auc_edit')):>12}"
+              f" {_fmt_auc(ft.get('auc_delta')):>11}")
 
     if 'test_set' in all_results:
         ts = all_results['test_set']
         print(f"{'Test Set':<25} {ts['accuracy_orig']*100:>11.2f}% "
-              f"{ts['accuracy_edit']*100:>11.2f}% {ts['accuracy_delta']*100:>+9.2f}%")
+              f"{ts['accuracy_edit']*100:>11.2f}% {ts['accuracy_delta']*100:>+9.2f}%"
+              f" {_fmt_auc(ts.get('auc_orig')):>12} {_fmt_auc(ts.get('auc_edit')):>12}"
+              f" {_fmt_auc(ts.get('auc_delta')):>11}")
 
     if 'edit_discovery' in all_results:
         ed = all_results['edit_discovery']
         print(f"{'Edit-Discovery Set':<25} {ed['accuracy_orig']*100:>11.2f}% "
-              f"{ed['accuracy_edit']*100:>11.2f}% {ed['accuracy_delta']*100:>+9.2f}%")
+              f"{ed['accuracy_edit']*100:>11.2f}% {ed['accuracy_delta']*100:>+9.2f}%"
+              f" {_fmt_auc(ed.get('auc_orig')):>12} {_fmt_auc(ed.get('auc_edit')):>12}"
+              f" {_fmt_auc(ed.get('auc_delta')):>11}")
 
     print("=" * 70)
 
