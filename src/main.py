@@ -62,6 +62,12 @@ from evaluator import (
 )
 
 
+MODEL_REGISTRY = {
+    "vit-base": "google/vit-base-patch16-224",
+    "vit-tiny": "WinKawaks/vit-tiny-patch16-224",
+}
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -93,6 +99,15 @@ Examples:
         default="pathmnist",
         choices=list(MEDMNIST_INFO.keys()),
         help="MedMNIST dataset to use (default: pathmnist)"
+    )
+
+    # Model selection
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="vit-base",
+        choices=list(MODEL_REGISTRY.keys()),
+        help="Model architecture (default: vit-base)"
     )
 
     # Data arguments
@@ -358,6 +373,8 @@ def run_train_stage(args, data_handler=None):
 
     # Initialize trainer with dynamic num_classes
     trainer = Trainer(
+        model_name=args.model_name,
+        model_short=args.model_short,
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
         num_classes=data_handler.n_classes,
@@ -422,6 +439,8 @@ def run_locate_stage(args, trainer=None, data_handler=None):
     # Get trainer/model
     if trainer is None:
         trainer = Trainer(
+            model_name=args.model_name,
+            model_short=args.model_short,
             checkpoint_dir=args.checkpoint_dir,
             log_dir=args.log_dir,
             num_classes=data_handler.n_classes,
@@ -507,6 +526,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
     # Get trainer/model
     if trainer is None:
         trainer = Trainer(
+            model_name=args.model_name,
+            model_short=args.model_short,
             checkpoint_dir=args.checkpoint_dir,
             log_dir=args.log_dir,
             num_classes=data_handler.n_classes,
@@ -592,7 +613,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
             device=device,
             hparams=hparams,
             log_dir=args.log_dir,
-            dataset_name=args.dataset
+            dataset_name=args.dataset,
+            model_short=args.model_short
         )
 
         # Compute Fisher information for EWC (skip if using closed-form)
@@ -645,7 +667,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
             device=device,
             hparams=hparams,
             log_dir=args.log_dir,
-            dataset_name=args.dataset
+            dataset_name=args.dataset,
+            model_short=args.model_short
         )
 
         # Precompute projection matrices
@@ -789,6 +812,8 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
     # Get transforms
     if trainer is None:
         trainer = Trainer(
+            model_name=args.model_name,
+            model_short=args.model_short,
             checkpoint_dir=args.checkpoint_dir,
             log_dir=args.log_dir,
             num_classes=data_handler.n_classes,
@@ -811,8 +836,8 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
     print("\n>>> EVALUATING ON OFFICIAL TEST SET <<<")
     print(">>> This set was NEVER used for training, validation, or editing <<<\n")
 
-    edited_path = Path(args.checkpoint_dir) / f"vit_{args.dataset}_edited.pt"
-    finetuned_path = Path(args.checkpoint_dir) / f"vit_{args.dataset}_finetuned.pt"
+    edited_path = Path(args.checkpoint_dir) / f"{args.model_short}_{args.dataset}_edited.pt"
+    finetuned_path = Path(args.checkpoint_dir) / f"{args.model_short}_{args.dataset}_finetuned.pt"
 
     # Case A: have both edited and finetuned checkpoints -> comparative evaluation
     if edited_path.exists() and finetuned_path.exists():
@@ -820,6 +845,8 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
 
         # Load baseline (before edit)
         baseline_trainer = Trainer(
+            model_name=args.model_name,
+            model_short=args.model_short,
             checkpoint_dir=args.checkpoint_dir,
             log_dir=args.log_dir,
             num_classes=data_handler.n_classes,
@@ -832,6 +859,8 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
 
         # Load edited model
         edited_trainer = Trainer(
+            model_name=args.model_name,
+            model_short=args.model_short,
             checkpoint_dir=args.checkpoint_dir,
             log_dir=args.log_dir,
             num_classes=data_handler.n_classes,
@@ -933,6 +962,8 @@ def run_baseline1_stage(args):
 
     # Initialize trainer to get transforms and find errors
     trainer = Trainer(
+        model_name=args.model_name,
+        model_short=args.model_short,
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
         num_classes=data_handler.n_classes,
@@ -942,7 +973,7 @@ def run_baseline1_stage(args):
     trainer.setup_model()
 
     # Load finetuned model to find misclassified samples
-    finetuned_path = Path(args.checkpoint_dir) / f"vit_{args.dataset}_finetuned.pt"
+    finetuned_path = Path(args.checkpoint_dir) / f"{args.model_short}_{args.dataset}_finetuned.pt"
     if not finetuned_path.exists():
         print(f"ERROR: Finetuned model not found at {finetuned_path}")
         print("Please run --stage train first.")
@@ -1020,6 +1051,8 @@ def run_baseline1_stage(args):
 
     # Load original finetuned model for comparison
     original_trainer = Trainer(
+        model_name=args.model_name,
+        model_short=args.model_short,
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
         num_classes=data_handler.n_classes,
@@ -1077,6 +1110,8 @@ def run_baseline2_stage(args):
 
     # Initialize trainer
     trainer = Trainer(
+        model_name=args.model_name,
+        model_short=args.model_short,
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
         num_classes=data_handler.n_classes,
@@ -1086,7 +1121,7 @@ def run_baseline2_stage(args):
     trainer.setup_model()
 
     # Load finetuned model to find misclassified samples
-    finetuned_path = Path(args.checkpoint_dir) / f"vit_{args.dataset}_finetuned.pt"
+    finetuned_path = Path(args.checkpoint_dir) / f"{args.model_short}_{args.dataset}_finetuned.pt"
     if not finetuned_path.exists():
         print(f"ERROR: Finetuned model not found at {finetuned_path}")
         print("Please run --stage train first.")
@@ -1164,6 +1199,8 @@ def run_baseline2_stage(args):
 
     # Load original finetuned model for comparison
     original_trainer = Trainer(
+        model_name=args.model_name,
+        model_short=args.model_short,
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
         num_classes=data_handler.n_classes,
@@ -1205,7 +1242,7 @@ def run_full_pipeline(args):
     data_handler = run_data_stage(args)
 
     # Stage 2: Training (skip if checkpoint exists)
-    checkpoint_path = Path(args.checkpoint_dir) / f"vit_{args.dataset}_finetuned.pt"
+    checkpoint_path = Path(args.checkpoint_dir) / f"{args.model_short}_{args.dataset}_finetuned.pt"
     if checkpoint_path.exists():
         print("\n" + "=" * 70)
         print("STAGE 2: FINE-TUNING (SKIPPED - checkpoint found)")
@@ -1213,6 +1250,8 @@ def run_full_pipeline(args):
         print(f"Loading existing checkpoint: {checkpoint_path}")
 
         trainer = Trainer(
+            model_name=args.model_name,
+            model_short=args.model_short,
             checkpoint_dir=args.checkpoint_dir,
             log_dir=args.log_dir,
             num_classes=data_handler.n_classes,
@@ -1257,6 +1296,10 @@ def main():
     """Main entry point."""
     args = parse_args()
 
+    # Resolve model name from registry
+    args.model_name = MODEL_REGISTRY[args.model]
+    args.model_short = args.model
+
     # Normalize max_edits (allow special 'all')
     if isinstance(args.max_edits, str) and args.max_edits.lower() in {"all", "*"}:
         args.max_edits = None
@@ -1285,6 +1328,7 @@ def main():
     print(f"  Classes: {dataset_info['n_classes']}")
     print(f"  Channels: {dataset_info['n_channels']} ({'Grayscale' if dataset_info['n_channels'] == 1 else 'RGB'})")
     print(f"  Description: {dataset_info['description']}")
+    print(f"  Model: {args.model_short} ({args.model_name})")
 
     # Create output directories
     Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)

@@ -50,6 +50,7 @@ def run_job(job_config: dict) -> dict:
     baseline = job_config["baseline"]
     gpu_id = job_config["gpu_id"]
     run_name = job_config["run_name"]
+    model = job_config["model"]
     baseline_epochs = job_config["baseline_epochs"]
     baseline_lr = job_config["baseline_lr"]
     max_edits = job_config["max_edits"]
@@ -63,6 +64,7 @@ def run_job(job_config: dict) -> dict:
         "uv", "run", "python", "src/main.py",
         "--stage", baseline,
         "--dataset", dataset,
+        "--model", model,
         "--run-name", run_name,
         "--baseline-epochs", str(baseline_epochs),
         "--max-edits", str(max_edits),
@@ -187,6 +189,13 @@ def main():
         help="Prefix for run names (default: timestamp)"
     )
     parser.add_argument(
+        "--model",
+        type=str,
+        default="vit-base",
+        choices=["vit-base", "vit-tiny"],
+        help="Model architecture (default: vit-base)"
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print commands without running"
@@ -207,6 +216,7 @@ def main():
                 "dataset": dataset,
                 "baseline": baseline,
                 "run_name": run_name,
+                "model": args.model,
                 "baseline_epochs": args.baseline_epochs,
                 "baseline_lr": args.baseline_lr,
                 "max_edits": args.max_edits,
@@ -239,6 +249,7 @@ def main():
                 "uv", "run", "python", "src/main.py",
                 "--stage", job["baseline"],
                 "--dataset", job["dataset"],
+                "--model", job["model"],
                 "--run-name", job["run_name"],
                 "--baseline-epochs", str(job["baseline_epochs"]),
                 "--max-edits", str(job["max_edits"]),

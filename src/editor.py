@@ -499,7 +499,8 @@ class Editor:
         device: torch.device = None,
         hparams: AlphaEditHyperParams = None,
         log_dir: str = "logs",
-        dataset_name: str = "pathmnist"
+        dataset_name: str = "pathmnist",
+        model_short: str = "vit-base"
     ):
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -510,6 +511,7 @@ class Editor:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.dataset_name = dataset_name
+        self.model_short = model_short
 
         # Components
         self.k_collector = KCollector(model, device, self.hparams)
@@ -801,7 +803,7 @@ class Editor:
     def save_edited_model(self, filepath: str = None) -> str:
         """Save the edited model."""
         if filepath is None:
-            filepath = Path("checkpoints") / f"vit_{self.dataset_name}_edited.pt"
+            filepath = Path("checkpoints") / f"{self.model_short}_{self.dataset_name}_edited.pt"
         else:
             filepath = Path(filepath)
 
@@ -841,7 +843,8 @@ class HeadEditor:
         device: torch.device = None,
         hparams: HeadEditHyperParams = None,
         log_dir: str = "logs",
-        dataset_name: str = "pathmnist"
+        dataset_name: str = "pathmnist",
+        model_short: str = "vit-base"
     ):
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -852,6 +855,7 @@ class HeadEditor:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.dataset_name = dataset_name
+        self.model_short = model_short
 
         # Fisher information for EWC
         self.fisher_weight = None
@@ -1204,7 +1208,7 @@ class HeadEditor:
     def save_edited_model(self, filepath: str = None) -> str:
         """Save the edited model."""
         if filepath is None:
-            filepath = Path("checkpoints") / f"vit_{self.dataset_name}_head_edited.pt"
+            filepath = Path("checkpoints") / f"{self.model_short}_{self.dataset_name}_head_edited.pt"
         else:
             filepath = Path(filepath)
 

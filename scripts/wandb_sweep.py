@@ -112,6 +112,7 @@ def train():
     base_cmd = [
         "uv", "run", "python", str(SRC_DIR / "main.py"),
         "--dataset", config.dataset,
+        "--model", getattr(config, 'model', 'vit-base'),
         "--run-name", run_name,
         "--max-samples", "50",
         "--max-edits", str(config.max_edits),

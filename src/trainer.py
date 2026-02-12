@@ -37,6 +37,7 @@ class Trainer:
     def __init__(
         self,
         model_name: str = "google/vit-base-patch16-224",
+        model_short: str = "vit-base",
         num_classes: int = 9,
         dataset_name: str = "pathmnist",
         checkpoint_dir: str = "checkpoints",
@@ -47,6 +48,7 @@ class Trainer:
         """
         Args:
             model_name: HuggingFace model identifier
+            model_short: Short model name for checkpoint naming (e.g., 'vit-base', 'vit-tiny')
             num_classes: Number of output classes (varies by dataset)
             dataset_name: Name of the dataset (for checkpoint naming)
             checkpoint_dir: Directory to save model checkpoints
@@ -55,6 +57,7 @@ class Trainer:
             n_channels: Number of input channels (1 for grayscale, 3 for RGB)
         """
         self.model_name = model_name
+        self.model_short = model_short
         self.num_classes = num_classes
         self.dataset_name = dataset_name
         self.checkpoint_dir = Path(checkpoint_dir)
@@ -89,8 +92,8 @@ class Trainer:
         self.training_history = []
 
         # Checkpoint naming (includes dataset name)
-        self.checkpoint_name = f"vit_{self.dataset_name}_finetuned.pt"
-        self.best_checkpoint_name = f"vit_{self.dataset_name}_best.pt"
+        self.checkpoint_name = f"{self.model_short}_{self.dataset_name}_finetuned.pt"
+        self.best_checkpoint_name = f"{self.model_short}_{self.dataset_name}_best.pt"
         
     def setup_model(self) -> nn.Module:
         """Initialize ViT model for image classification."""
@@ -576,8 +579,8 @@ class Trainer:
         self.setup_model()
 
         # Update checkpoint name
-        self.checkpoint_name = f"vit_{self.dataset_name}_{checkpoint_suffix}.pt"
-        self.best_checkpoint_name = f"vit_{self.dataset_name}_{checkpoint_suffix}_best.pt"
+        self.checkpoint_name = f"{self.model_short}_{self.dataset_name}_{checkpoint_suffix}.pt"
+        self.best_checkpoint_name = f"{self.model_short}_{self.dataset_name}_{checkpoint_suffix}_best.pt"
 
         # Reset training state
         self.current_epoch = 0
@@ -617,7 +620,7 @@ class Trainer:
             Training results dictionary
         """
         # Load existing finetuned model
-        finetuned_path = self.checkpoint_dir / f"vit_{self.dataset_name}_finetuned.pt"
+        finetuned_path = self.checkpoint_dir / f"{self.model_short}_{self.dataset_name}_finetuned.pt"
         if not finetuned_path.exists():
             raise FileNotFoundError(
                 f"Finetuned model not found: {finetuned_path}. "
@@ -628,8 +631,8 @@ class Trainer:
         self.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
 
         # Update checkpoint name for this baseline
-        self.checkpoint_name = f"vit_{self.dataset_name}_{checkpoint_suffix}.pt"
-        self.best_checkpoint_name = f"vit_{self.dataset_name}_{checkpoint_suffix}_best.pt"
+        self.checkpoint_name = f"{self.model_short}_{self.dataset_name}_{checkpoint_suffix}.pt"
+        self.best_checkpoint_name = f"{self.model_short}_{self.dataset_name}_{checkpoint_suffix}_best.pt"
 
         # Reset training state (but keep model weights)
         self.current_epoch = 0

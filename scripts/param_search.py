@@ -241,6 +241,14 @@ def parse_args():
 
     # === Baseline Configuration ===
     parser.add_argument(
+        "--model",
+        type=str,
+        default="vit-base",
+        choices=["vit-base", "vit-tiny"],
+        help="Model architecture (default: vit-base)"
+    )
+
+    parser.add_argument(
         "--no-baselines",
         action="store_true",
         help="Disable running baseline comparisons (baseline1: retrain, baseline2: finetune-errors)"
@@ -372,6 +380,7 @@ def build_commands(config: Dict[str, Any], args, run_name: str) -> List[str]:
         sys.executable,
         str(SRC_DIR / "main.py"),
         "--dataset", config['dataset'],
+        "--model", args.model,
         "--run-name", run_name,
         "--max-samples", str(config['max_samples']),
         "--max-edits", str(config['max_edits']),
@@ -542,6 +551,7 @@ def run_baseline_worker(
         str(SRC_DIR / "main.py"),
         "--stage", baseline_type,
         "--dataset", dataset,
+        "--model", args.model,
         "--run-name", run_name,
         "--max-edits", str(max_edits),
         "--baseline-epochs", str(args.baseline_epochs),

@@ -30,7 +30,7 @@ Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for c
 ## Project Goal
 
 1. **Data Splitting (4-Set Protocol)**: Implement strict data isolation with FT-Train, Edit-Discovery, FT-Val, and Test Set
-2. **Fine-tuning**: Train `vit-base-patch16-224` on FT-Train set
+2. **Fine-tuning**: Train ViT model on FT-Train set (supports `vit-base-patch16-224` and `vit-tiny-patch16-224`)
 3. **Locate Layers**: Use **ASTRA-style Causal Tracing** on Edit-Discovery set to identify significant layers
 4. **Edit Weights**: Apply **AlphaEdit** (MLP layers) or **Head Editing** (classifier only) to correct errors
 5. **Baselines**: Compare with traditional approaches (Retrain, Finetune-on-Errors)
@@ -48,11 +48,11 @@ E:\ModelEdit_val\
 │   ├── evaluator.py         # Comparative evaluation on Official Test Set
 │   └── main.py              # CLI entry point (--dataset argument)
 ├── checkpoints/
-│   ├── vit_{dataset}_finetuned.pt     # Fine-tuned model (per dataset)
-│   ├── vit_{dataset}_edited.pt        # AlphaEdit edited model
-│   ├── vit_{dataset}_head_edited.pt   # Head edited model
-│   ├── vit_{dataset}_retrained.pt     # Baseline 1: Retrained model
-│   ├── vit_{dataset}_finetuned_on_errors.pt  # Baseline 2: Finetuned on errors
+│   ├── {model}_{dataset}_finetuned.pt     # Fine-tuned model (per model & dataset)
+│   ├── {model}_{dataset}_edited.pt        # AlphaEdit edited model
+│   ├── {model}_{dataset}_head_edited.pt   # Head edited model
+│   ├── {model}_{dataset}_retrained.pt     # Baseline 1: Retrained model
+│   ├── {model}_{dataset}_finetuned_on_errors.pt  # Baseline 2: Finetuned on errors
 │   └── projection_cache.pt            # Cached null-space projections
 ├── logs/
 │   └── {timestamp}/                 # Timestamped run logs
@@ -136,12 +136,15 @@ dataset/labs.npy   # Labels array (0=F0, 1=F1, 2=F2, 3=F3-F4)
 ### Running the Pipeline
 
 ```bash
-# Run complete pipeline with default dataset (pathmnist)
+# Run complete pipeline with default dataset and model (pathmnist, vit-base)
 uv run python src/main.py --stage full --timestamp
+
+# Run with vit-tiny model (5.7M params, faster)
+uv run python src/main.py --stage full --dataset pathmnist --model vit-tiny --timestamp
 
 # Run with a specific MedMNIST dataset
 uv run python src/main.py --stage full --dataset dermamnist --timestamp
-uv run python src/main.py --stage full --dataset organamnist --timestamp
+uv run python src/main.py --stage full --dataset organamnist --model vit-tiny --timestamp
 
 # Run with Liver Fibrosis dataset (requires --data-path)
 uv run python src/main.py --stage full --dataset liver4 --data-path dataset/ --timestamp
@@ -178,12 +181,14 @@ Implements the **4-Set Protocol** for rigorous data isolation:
 
 ### Stage 2: Fine-tuning (`--stage train`)
 
-- Uses `google/vit-base-patch16-224` with 9-class head
+- Supports multiple model architectures via `--model`:
+  - `vit-base` (default): `google/vit-base-patch16-224` (86M params)
+  - `vit-tiny`: `WinKawaks/vit-tiny-patch16-224` (5.7M params)
 - Trains on **FT-Train set only** (90% of official train)
 - Uses **FT-Val** for early stopping
 - **Auto-detects GPU/CPU** for optimal performance
 - **Skips training if checkpoint exists** (loads from checkpoint)
-- Exports: `checkpoints/vit_pathmnist_finetuned.pt`, `logs/training_metrics.csv`
+- Exports: `checkpoints/{model}_{dataset}_finetuned.pt`, `logs/training_metrics.csv`
 
 ### Stage 3: Layer Localization (`--stage locate`)
 
@@ -230,7 +235,7 @@ A simpler, faster alternative that modifies only the classification head:
 - Processes all samples in one batch (faster)
 - Optional closed-form solution with `--closed-form`
 
-Exports: `logs/edit_log.csv` or `logs/head_edit_log.csv`, `checkpoints/vit_pathmnist_*.pt`
+Exports: `logs/edit_log.csv` or `logs/head_edit_log.csv`, `checkpoints/{model}_{dataset}_*.pt`
 
 ### Stage 5: Evaluation (`--stage eval`)
 
@@ -296,6 +301,13 @@ Both baselines use the same evaluation framework:
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--dataset` | `pathmnist` | Dataset name: MedMNIST (`pathmnist`, `dermamnist`, `retinamnist`, `organamnist`, `bloodmnist`, `tissuemnist`) or Liver Fibrosis (`liver4`, `liver2s`, `liver2a`) |
+
+### Model Selection
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model` | `vit-base` | Model architecture: `vit-base` (`google/vit-base-patch16-224`, 86M params) or `vit-tiny` (`WinKawaks/vit-tiny-patch16-224`, 5.7M params) |
+
+Checkpoints are namespaced by model: `{model}_{dataset}_finetuned.pt` (e.g., `vit-base_pathmnist_finetuned.pt`, `vit-tiny_pathmnist_finetuned.pt`).
 
 ### Data Options
 | Argument | Default | Description |
@@ -370,6 +382,13 @@ The pipeline determines which layers to edit using this priority:
 # === Default Dataset (PathMNIST) ===
 # AlphaEdit with ASTRA results, edit top 3 layers (default)
 uv run python src/main.py --stage full
+
+# === Model Selection ===
+# Use vit-tiny (5.7M params, faster training and editing)
+uv run python src/main.py --stage full --dataset pathmnist --model vit-tiny --timestamp
+
+# Use vit-base (86M params, default)
+uv run python src/main.py --stage full --dataset pathmnist --model vit-base --timestamp
 
 # === Multi-Dataset Examples ===
 # DermaMNIST (Imbalanced skin lesion classification)
@@ -451,7 +470,7 @@ Official MedMNIST Data
          ▼
 ┌─────────────────────────────────────────────┐
 │  Stage 2: Fine-tuning (on FT-Train)         │
-│  ViT-B/16 → ~99% accuracy                   │
+│  ViT (vit-base or vit-tiny) → fine-tune      │
 │  Early stopping with FT-Val                 │
 │  [Skipped if checkpoint exists]             │
 └─────────────────────────────────────────────┘
@@ -488,7 +507,7 @@ Official MedMNIST Data
 | Aspect | AlphaEdit | Head Editing |
 |--------|-----------|--------------|
 | **Target** | MLP output layers | Classifier head only |
-| **Parameters** | ~2.36M per layer | 6,912 (768×9 + 9) |
+| **Parameters** | ~2.36M per layer (vit-base) | Depends on hidden_size × num_classes |
 | **Precomputation** | Null-space projection | Fisher information |
 | **Regularization** | Null-space constraint | EWC |
 | **Processing** | Per-sample | Batch (all samples) |
@@ -787,6 +806,15 @@ All experiments log these metrics to W&B:
 
 ## Changelog
 
+### v1.10.0 (2026-02-12)
+- **Multi-Model Support**: Added `--model` CLI argument to select model architecture
+  - `vit-base` (default): `google/vit-base-patch16-224` (86M params)
+  - `vit-tiny`: `WinKawaks/vit-tiny-patch16-224` (5.7M params)
+- **Model-Namespaced Checkpoints**: Checkpoint files now include model name to prevent conflicts
+  - Old: `vit_{dataset}_finetuned.pt`
+  - New: `{model}_{dataset}_finetuned.pt` (e.g., `vit-base_pathmnist_finetuned.pt`, `vit-tiny_pathmnist_edited.pt`)
+- **Scripts Updated**: `param_search.py`, `wandb_sweep.py`, `run_all_baselines.py` all support `--model` passthrough
+
 ### v1.9.0 (2026-02-01)
 - **W&B Integration**: Added Weights & Biases support for experiment tracking and sweeps
   - `scripts/wandb_sweep.py`: Sweep agent entry point
@@ -864,7 +892,7 @@ All experiments log these metrics to W&B:
   - TissueMNIST (8 classes, Grayscale) - Kidney Cortex Microscopy
 - **Grayscale Handling**: Automatic conversion to 3-channel RGB for ViT compatibility
 - **Dynamic num_classes**: Model head size adapts to dataset
-- **Dataset-specific checkpoints**: `vit_{dataset}_finetuned.pt`, `vit_{dataset}_edited.pt`
+- **Dataset-specific checkpoints**: `{model}_{dataset}_finetuned.pt`, `{model}_{dataset}_edited.pt`
 - **New argument**: `--dataset` to select MedMNIST dataset
 
 ### v1.4.0 (2026-01-16)
