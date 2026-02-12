@@ -267,6 +267,23 @@ def parse_args():
         default=1e-5,
         help="Learning rate for baseline2 finetune-on-errors (default: 1e-5)"
     )
+    parser.add_argument(
+        "--baseline2-batch-size",
+        type=int,
+        default=None,
+        help="Batch size for baseline2 finetuning on errors (default: same as main --batch-size)"
+    )
+    parser.add_argument(
+        "--v-grad-steps",
+        type=int,
+        default=25,
+        help="Gradient steps for AlphaEdit target vector optimization (default: 25)"
+    )
+    parser.add_argument(
+        "--batch-edit",
+        action="store_true",
+        help="Batch all edit samples into one apply_edit call (faster GPU utilization, higher memory)"
+    )
 
     # === W&B Integration ===
     parser.add_argument(
@@ -390,7 +407,11 @@ def build_commands(config: Dict[str, Any], args, run_name: str) -> List[str]:
         "--log-dir", args.logs_dir,
         "--results-dir", args.results_dir,
         "--stage", "full",  # Use full pipeline (locate → edit → eval)
+        "--v-grad-steps", str(args.v_grad_steps),
     ]
+
+    if args.batch_edit:
+        cmd.append("--batch-edit")
 
     # Add data-path for liver fibrosis datasets
     if config['dataset'].startswith('liver'):
@@ -567,6 +588,8 @@ def run_baseline_worker(
 
     if baseline_type == "baseline2":
         cmd.extend(["--baseline-lr", str(args.baseline_lr)])
+        if args.baseline2_batch_size is not None:
+            cmd.extend(["--baseline2-batch-size", str(args.baseline2_batch_size)])
 
     # Create config dict similar to alphaedit experiments (with baseline-specific fields)
     config = {

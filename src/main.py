@@ -219,6 +219,17 @@ Examples:
         default=1e-2,
         help="Threshold for null-space eigenvalue selection (default: 1e-2)"
     )
+    parser.add_argument(
+        "--v-grad-steps",
+        type=int,
+        default=25,
+        help="Gradient steps for AlphaEdit target vector optimization (default: 25)"
+    )
+    parser.add_argument(
+        "--batch-edit",
+        action="store_true",
+        help="Batch all edit samples into one apply_edit call (faster GPU utilization, higher memory)"
+    )
 
     # Head editing specific arguments
     parser.add_argument(
@@ -257,6 +268,12 @@ Examples:
         type=float,
         default=1e-5,
         help="Learning rate for baseline finetuning (default: 1e-5)"
+    )
+    parser.add_argument(
+        "--baseline2-batch-size",
+        type=int,
+        default=None,
+        help="Batch size for baseline2 finetuning on errors (default: same as --batch-size)"
     )
 
     parser.add_argument(
@@ -592,6 +609,8 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
     print(f"  Edit samples accuracy BEFORE: {results_before['accuracy']*100:.1f}% "
           f"({results_before['num_correct']}/{results_before['num_total']})")
 
+    edit_seconds = None
+
     # Select editing method
     if args.edit_method == "head":
         # Head Editing: modify only classifier
@@ -656,7 +675,7 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
 
         hparams = AlphaEditHyperParams(
             layers=edit_layers,
-            v_num_grad_steps=25,
+            v_num_grad_steps=args.v_grad_steps,
             v_lr=0.1,
             L2=1e-4,
             nullspace_threshold=args.nullspace_threshold
@@ -699,17 +718,38 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         else:
             proj_results_before = None
 
-        # Apply edits one by one
-        for idx in tqdm(edit_indices, desc="Applying edits"):
-            image, label = discovery_dataset[idx]
-            image = image.unsqueeze(0)
-            label_tensor = torch.tensor([label])
+        edit_start = time.time()
+        if args.batch_edit:
+            # Batch mode: collect all samples and apply in one call (faster)
+            edit_images_list = []
+            edit_labels_list = []
+            for idx in edit_indices:
+                image, label = discovery_dataset[idx]
+                edit_images_list.append(image)
+                edit_labels_list.append(label)
 
+            edit_images_batch = torch.stack(edit_images_list)
+            edit_labels_batch = torch.tensor(edit_labels_list)
+
+            print(f"  Applying batch edit: {len(edit_indices)} samples")
             editor.apply_edit(
-                images=image,
-                true_labels=label_tensor,
-                sample_indices=[int(idx)]
+                images=edit_images_batch,
+                true_labels=edit_labels_batch,
+                sample_indices=[int(idx) for idx in edit_indices]
             )
+        else:
+            # Sequential mode: apply edits one by one (default, lower memory)
+            for idx in tqdm(edit_indices, desc="Applying edits"):
+                image, label = discovery_dataset[idx]
+                image = image.unsqueeze(0)
+                label_tensor = torch.tensor([label])
+
+                editor.apply_edit(
+                    images=image,
+                    true_labels=label_tensor,
+                    sample_indices=[int(idx)]
+                )
+        edit_seconds = time.time() - edit_start
 
         # Save edited model
         editor.export_edit_log()
@@ -786,7 +826,7 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
         results_dir=args.results_dir
     )
 
-    return editor
+    return editor, edit_seconds
 
 
 def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
@@ -998,7 +1038,7 @@ def run_baseline1_stage(args):
 
     if len(misclassified['indices']) == 0:
         print("No misclassified samples found!")
-        return None
+        return None, None
 
     error_indices = np.array(misclassified['indices'][:args.max_edits])
     print(f"  Found {len(error_indices)} error samples to include in training")
@@ -1016,6 +1056,7 @@ def run_baseline1_stage(args):
     edit_labels = torch.tensor(labels_list)
     edit_indices_list = [int(i) for i in error_indices]
 
+    edit_start = time.time()
     # Create combined dataset (FT-Train + error samples)
     print("\nCreating combined training dataset...")
     combined_dataset = data_handler.get_combined_ft_train_with_errors(
@@ -1048,7 +1089,8 @@ def run_baseline1_stage(args):
 
     print(f"\n[OK] Baseline 1 training complete!")
     print(f"  Best accuracy: {results['best_acc']:.2f}%")
-
+    edit_seconds = time.time() - edit_start
+    
     # Load original finetuned model for comparison
     original_trainer = Trainer(
         model_name=args.model_name,
@@ -1081,7 +1123,7 @@ def run_baseline1_stage(args):
         baseline_name="retrain"
     )
 
-    return baseline_results
+    return baseline_results, edit_seconds
 
 
 def run_baseline2_stage(args):
@@ -1146,7 +1188,7 @@ def run_baseline2_stage(args):
 
     if len(misclassified['indices']) == 0:
         print("No misclassified samples found!")
-        return None
+        return None, None
 
     error_indices = np.array(misclassified['indices'][:args.max_edits])
     print(f"  Found {len(error_indices)} error samples for finetuning")
@@ -1172,9 +1214,10 @@ def run_baseline2_stage(args):
     )
 
     from torch.utils.data import DataLoader
+    baseline2_bs = args.baseline2_batch_size if args.baseline2_batch_size is not None else args.batch_size
     error_loader = DataLoader(
         error_dataset,
-        batch_size=min(args.batch_size, len(error_dataset)),
+        batch_size=min(baseline2_bs, len(error_dataset)),
         shuffle=True,
         num_workers=0,
         pin_memory=args.pin_memory if args.pin_memory is not None else torch.cuda.is_available()
@@ -1185,7 +1228,9 @@ def run_baseline2_stage(args):
     print(f"  Epochs: {args.baseline_epochs}")
     print(f"  Learning rate: {args.baseline_lr}")
     print(f"  Error samples: {len(error_dataset)}")
+    print(f"  Batch size: {error_loader.batch_size}")
 
+    edit_start = time.time()
     results = trainer.finetune_on_samples(
         finetune_loader=error_loader,
         val_loader=dataloaders['val'],
@@ -1193,6 +1238,7 @@ def run_baseline2_stage(args):
         learning_rate=args.baseline_lr,
         checkpoint_suffix="finetuned_on_errors"
     )
+    edit_seconds = time.time() - edit_start
 
     print(f"\n[OK] Baseline 2 finetuning complete!")
     print(f"  Best accuracy: {results['best_acc']:.2f}%")
@@ -1229,7 +1275,7 @@ def run_baseline2_stage(args):
         baseline_name="finetune_errors"
     )
 
-    return baseline_results
+    return baseline_results, edit_seconds
 
 
 def run_full_pipeline(args):
@@ -1274,10 +1320,8 @@ def run_full_pipeline(args):
         print(f"\nASTRA top {args.num_edit_layers} layers: {astra_layers}")
 
     # Stage 4: Editing (re-find misclassified using max_edits; pass ASTRA layers only)
-    edit_start = time.time()
-    editor = run_edit_stage(args, trainer, data_handler, misclassified=None, astra_layers=astra_layers)
-    edit_seconds = time.time() - edit_start
-    
+    editor, edit_seconds = run_edit_stage(args, trainer, data_handler, misclassified=None, astra_layers=astra_layers)
+
     # Stage 5: Evaluation
     evaluator = run_eval_stage(args, trainer, data_handler, editor.model if editor else None)
     
@@ -1358,26 +1402,22 @@ def main():
     elif args.stage == "locate":
         run_locate_stage(args)
     elif args.stage == "edit":
-        edit_start = time.time()
-        run_edit_stage(args)
-        edit_seconds = time.time() - edit_start
+        _, edit_seconds = run_edit_stage(args)
     elif args.stage == "eval":
         run_eval_stage(args)
     elif args.stage == "full":
         edit_seconds = run_full_pipeline(args)
     elif args.stage == "baseline1":
-        run_baseline1_stage(args)
+        _, edit_seconds = run_baseline1_stage(args)
     elif args.stage == "baseline2":
-        run_baseline2_stage(args)
+        _, edit_seconds = run_baseline2_stage(args)
     else:
         print(f"Unknown stage: {args.stage}")
         sys.exit(1)
 
     duration_seconds = time.time() - start_time
-    if args.stage in {"edit", "full"}:
+    if args.stage in {"edit", "full", "baseline1", "baseline2"}:
         export_timing_metrics(args.results_dir, duration_seconds, edit_seconds)
-    elif args.stage in {"baseline1", "baseline2"}:
-        export_timing_metrics(args.results_dir, duration_seconds, duration_seconds)
 
 
 if __name__ == "__main__":

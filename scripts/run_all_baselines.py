@@ -54,6 +54,7 @@ def run_job(job_config: dict) -> dict:
     baseline_epochs = job_config["baseline_epochs"]
     baseline_lr = job_config["baseline_lr"]
     max_edits = job_config["max_edits"]
+    baseline2_batch_size = job_config["baseline2_batch_size"]
 
     # Set environment for this GPU
     env = os.environ.copy()
@@ -73,6 +74,8 @@ def run_job(job_config: dict) -> dict:
     # Add baseline-lr only for baseline2
     if baseline == "baseline2":
         cmd.extend(["--baseline-lr", str(baseline_lr)])
+        if baseline2_batch_size is not None:
+            cmd.extend(["--baseline2-batch-size", str(baseline2_batch_size)])
 
     start_time = time.time()
     job_name = f"{dataset}_{baseline}"
@@ -200,6 +203,12 @@ def main():
         action="store_true",
         help="Print commands without running"
     )
+    parser.add_argument(
+        "--baseline2-batch-size",
+        type=int,
+        default=None,
+        help="Batch size for baseline2 finetuning on errors (default: same as --batch-size)"
+    )
 
     args = parser.parse_args()
 
@@ -220,6 +229,7 @@ def main():
                 "baseline_epochs": args.baseline_epochs,
                 "baseline_lr": args.baseline_lr,
                 "max_edits": args.max_edits,
+                "baseline2_batch_size": args.baseline2_batch_size,
                 "gpu_id": None  # Will be assigned later
             })
 
@@ -256,6 +266,8 @@ def main():
             ]
             if job["baseline"] == "baseline2":
                 cmd.extend(["--baseline-lr", str(job["baseline_lr"])])
+                if job["baseline2_batch_size"] is not None:
+                    cmd.extend(["--baseline2-batch-size", str(job["baseline2_batch_size"])])
 
             print(f"\n  CUDA_VISIBLE_DEVICES={job['gpu_id']} {' '.join(cmd)}")
         return

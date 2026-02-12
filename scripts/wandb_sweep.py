@@ -119,7 +119,11 @@ def train():
         "--projection-samples", str(config.projection_samples),
         "--nullspace-threshold", str(config.nullspace_threshold),
         "--num-edit-layers", str(config.num_edit_layers),
+        "--v-grad-steps", str(getattr(config, 'v_grad_steps', 25)),
     ]
+
+    if getattr(config, 'batch_edit', False):
+        base_cmd.append("--batch-edit")
 
     # Add data-path for liver datasets
     if hasattr(config, 'data_path') and config.data_path:

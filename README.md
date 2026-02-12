@@ -342,6 +342,8 @@ Checkpoints are namespaced by model: `{model}_{dataset}_finetuned.pt` (e.g., `vi
 | `--max-edits` | 30 | Maximum samples to edit (or `all`/`*` for no limit) |
 | `--projection-samples` | 500 | Number of FT-Train samples for projection matrix construction |
 | `--nullspace-threshold` | 1e-2 | Threshold for null-space eigenvalue selection |
+| `--v-grad-steps` | 25 | Gradient steps for AlphaEdit target vector optimization |
+| `--batch-edit` | False | Batch all edit samples into one call (faster GPU utilization, higher memory) |
 
 ### Head Editing Options
 | Argument | Default | Description |
@@ -356,6 +358,7 @@ Checkpoints are namespaced by model: `{model}_{dataset}_finetuned.pt` (e.g., `vi
 |----------|---------|-------------|
 | `--baseline-epochs` | 10 | Number of epochs for baseline training |
 | `--baseline-lr` | 1e-5 | Learning rate for baseline finetuning (Baseline 2) |
+| `--baseline2-batch-size` | same as `--batch-size` | Batch size for baseline2 finetuning (set to 1 for per-sample comparison with AlphaEdit) |
 
 ### Output Options
 | Argument | Default | Description |
