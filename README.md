@@ -588,6 +588,7 @@ uv run python scripts/collect_results.py --results-dir results
 | Num Edit Layers | `--num-edit-layers-range` | `[1,2,3,4,5]` | Top-K ASTRA layers to edit |
 | Fixed Edit Layers | `--fixed-edit-layers` | None | Specific layer combinations (e.g., `9,10,11`) |
 | Max Edits | `--max-edits-range` | `[10,20,30,50]` | Number of error samples to edit |
+| V Gradient Steps | `--v-grad-steps-range` | `[25]` | Gradient steps for AlphaEdit target vector optimization |
 | Max Samples | `--max-samples` | `50` | Max samples for ASTRA locator (fixed, not searched) |
 
 ### Execution Control
@@ -610,6 +611,7 @@ Each AlphaEdit experiment can be automatically compared with two baseline method
 | Disable Baselines | `--no-baselines` | False | Skip baseline comparisons |
 | Baseline Epochs | `--baseline-epochs` | `10` | Training epochs for baselines |
 | Baseline LR | `--baseline-lr` | `1e-5` | Learning rate for baseline2 (finetune-errors) |
+| Baseline2 Batch Size | `--baseline2-batch-size` | None | Batch size for baseline2 finetuning |
 
 **Baseline Methods:**
 - **Baseline 1 (Retrain)**: Add error samples to FT-Train, train new model from scratch
@@ -724,7 +726,6 @@ The following parameters are currently fixed at default values but could be expl
 | Parameter | CLI Argument | Default | Potential Impact |
 |-----------|--------------|---------|------------------|
 | V Learning Rate | `--v-lr` | `0.1` | AlphaEdit target Z optimization quality |
-| V Gradient Steps | `--v-num-grad-steps` | `25` | More steps may improve precision |
 | L2 Regularization | `--L2` | `1e-4` | Edit magnitude vs stability tradeoff |
 | Head Learning Rate | `--head-lr` | `0.01` | HeadEditor optimization (head method only) |
 | Head Steps | `--head-steps` | `50` | HeadEditor convergence |
