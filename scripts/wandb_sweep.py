@@ -122,8 +122,8 @@ def train():
         "--v-grad-steps", str(getattr(config, 'v_grad_steps', 25)),
     ]
 
-    if getattr(config, 'batch_edit', False):
-        base_cmd.append("--batch-edit")
+    ebs = getattr(config, 'edit_batch_size', '1')
+    base_cmd.extend(["--edit-batch-size", str(ebs)])
 
     # Add data-path for liver datasets
     if hasattr(config, 'data_path') and config.data_path:

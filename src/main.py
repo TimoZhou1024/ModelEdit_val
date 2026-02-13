@@ -226,9 +226,10 @@ Examples:
         help="Gradient steps for AlphaEdit target vector optimization (default: 25)"
     )
     parser.add_argument(
-        "--batch-edit",
-        action="store_true",
-        help="Batch all edit samples into one apply_edit call (faster GPU utilization, higher memory)"
+        "--edit-batch-size",
+        type=str,
+        default="1",
+        help="Samples per edit batch: 1=sequential (default), N=chunked (paper uses 100), 0 or 'all'=all at once"
     )
 
     # Head editing specific arguments
@@ -723,36 +724,24 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
             proj_results_before = None
 
         edit_start = time.time()
-        if args.batch_edit:
-            # Batch mode: collect all samples and apply in one call (faster)
-            edit_images_list = []
-            edit_labels_list = []
-            for idx in edit_indices:
-                image, label = discovery_dataset[idx]
-                edit_images_list.append(image)
-                edit_labels_list.append(label)
+        batch_size = args.edit_batch_size
+        n_samples = len(edit_indices)
+        if batch_size == 0:
+            batch_size = n_samples
 
-            edit_images_batch = torch.stack(edit_images_list)
-            edit_labels_batch = torch.tensor(edit_labels_list)
+        print(f"  Edit batch size: {batch_size} (total samples: {n_samples})")
 
-            print(f"  Applying batch edit: {len(edit_indices)} samples")
+        for chunk_start in tqdm(
+            range(0, n_samples, batch_size),
+            desc="Applying edits",
+            total=(n_samples + batch_size - 1) // batch_size,
+        ):
+            chunk_end = min(chunk_start + batch_size, n_samples)
             editor.apply_edit(
-                images=edit_images_batch,
-                true_labels=edit_labels_batch,
-                sample_indices=[int(idx) for idx in edit_indices]
+                images=edit_images[chunk_start:chunk_end],
+                true_labels=edit_labels[chunk_start:chunk_end],
+                sample_indices=edit_indices_list[chunk_start:chunk_end],
             )
-        else:
-            # Sequential mode: apply edits one by one (default, lower memory)
-            for idx in tqdm(edit_indices, desc="Applying edits"):
-                image, label = discovery_dataset[idx]
-                image = image.unsqueeze(0)
-                label_tensor = torch.tensor([label])
-
-                editor.apply_edit(
-                    images=image,
-                    true_labels=label_tensor,
-                    sample_indices=[int(idx)]
-                )
         edit_seconds = time.time() - edit_start
 
         # Save edited model
@@ -761,6 +750,7 @@ def run_edit_stage(args, trainer=None, data_handler=None, misclassified=None, as
 
         print("\n[OK] AlphaEdit complete!")
         print(f"  Edited samples: {len(edit_indices)}")
+        print(f"  Edit batch size: {args.edit_batch_size}")
         print(f"  Edited layers: {edit_layers}")
 
         # ================================================================
@@ -1357,6 +1347,12 @@ def main():
         args.max_edits = None
     else:
         args.max_edits = int(args.max_edits)
+
+    # Normalize edit_batch_size (allow special 'all' or '0')
+    if isinstance(args.edit_batch_size, str) and args.edit_batch_size.lower() in {"all", "0"}:
+        args.edit_batch_size = 0  # 0 means "all at once"
+    else:
+        args.edit_batch_size = int(args.edit_batch_size)
 
     # Apply timestamp or run name to output directories
     if args.run_name:

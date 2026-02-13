@@ -281,9 +281,12 @@ def parse_args():
         help="Values for --v-grad-steps to search (default: [25])"
     )
     parser.add_argument(
-        "--batch-edit",
-        action="store_true",
-        help="Batch all edit samples into one apply_edit call (faster GPU utilization, higher memory)"
+        "--edit-batch-size-range",
+        type=str,
+        nargs="+",
+        default=["1"],
+        help="Values for --edit-batch-size to search (default: [1]). "
+             "Example: --edit-batch-size-range 1 10 50 all"
     )
 
     # === W&B Integration ===
@@ -337,6 +340,7 @@ def build_run_name(config: Dict[str, Any]) -> str:
     edit = config['max_edits']
     thresh = format_threshold(config['nullspace_threshold'])
     v_grad = config.get('v_grad_steps', 25)
+    ebs = config.get('edit_batch_size', '1')
 
     if config['mode'] == 'astra':
         layer_desc = f"astra{config['num_edit_layers']}"
@@ -347,6 +351,8 @@ def build_run_name(config: Dict[str, Any]) -> str:
     name = f"{dataset}/proj{proj}_edit{edit}_{layer_desc}_thresh{thresh}"
     if v_grad != 25:
         name += f"_vgrad{v_grad}"
+    if str(ebs) != "1":
+        name += f"_ebs{ebs}"
     return name
 
 
@@ -365,36 +371,39 @@ def build_experiment_configs(args) -> List[Dict[str, Any]]:
                 for max_edits in args.max_edits_range:
                     max_edits = normalize_max_edits(max_edits)
                     for v_grad_steps in args.v_grad_steps_range:
-                        # ASTRA-based experiments
-                        astra_layers = [n for n in args.num_edit_layers_range if n > 0]
-                        for num_layers in astra_layers:
-                            configs.append({
-                                'dataset': dataset,
-                                'mode': 'astra',
-                                'num_edit_layers': num_layers,
-                                'edit_layers': None,
-                                'projection_samples': proj_samples,
-                                'nullspace_threshold': threshold,
-                                'max_edits': max_edits,
-                                'max_samples': args.max_samples,
-                                'v_grad_steps': v_grad_steps,
-                            })
-
-                        # Fixed layer experiments
-                        if args.fixed_edit_layers:
-                            for layers_str in args.fixed_edit_layers:
-                                layers = [int(x) for x in layers_str.split(',')]
+                        for edit_batch_size in args.edit_batch_size_range:
+                            # ASTRA-based experiments
+                            astra_layers = [n for n in args.num_edit_layers_range if n > 0]
+                            for num_layers in astra_layers:
                                 configs.append({
                                     'dataset': dataset,
-                                    'mode': 'fixed',
-                                    'num_edit_layers': None,
-                                    'edit_layers': layers,
+                                    'mode': 'astra',
+                                    'num_edit_layers': num_layers,
+                                    'edit_layers': None,
                                     'projection_samples': proj_samples,
                                     'nullspace_threshold': threshold,
                                     'max_edits': max_edits,
                                     'max_samples': args.max_samples,
                                     'v_grad_steps': v_grad_steps,
+                                    'edit_batch_size': edit_batch_size,
                                 })
+
+                            # Fixed layer experiments
+                            if args.fixed_edit_layers:
+                                for layers_str in args.fixed_edit_layers:
+                                    layers = [int(x) for x in layers_str.split(',')]
+                                    configs.append({
+                                        'dataset': dataset,
+                                        'mode': 'fixed',
+                                        'num_edit_layers': None,
+                                        'edit_layers': layers,
+                                        'projection_samples': proj_samples,
+                                        'nullspace_threshold': threshold,
+                                        'max_edits': max_edits,
+                                        'max_samples': args.max_samples,
+                                        'v_grad_steps': v_grad_steps,
+                                        'edit_batch_size': edit_batch_size,
+                                    })
 
     return configs
 
@@ -418,8 +427,8 @@ def build_commands(config: Dict[str, Any], args, run_name: str) -> List[str]:
         "--v-grad-steps", str(config.get('v_grad_steps', 25)),
     ]
 
-    if args.batch_edit:
-        cmd.append("--batch-edit")
+    ebs = config.get('edit_batch_size', '1')
+    cmd.extend(["--edit-batch-size", str(ebs)])
 
     # Add data-path for liver fibrosis datasets
     if config['dataset'].startswith('liver'):
@@ -969,6 +978,7 @@ def main():
     if args.fixed_edit_layers:
         print(f"  --fixed-edit-layers: {args.fixed_edit_layers}")
     print(f"  --max-edits-range: {args.max_edits_range}")
+    print(f"  --edit-batch-size-range: {args.edit_batch_size_range}")
     print(f"  --max-samples (fixed): {args.max_samples}")
     print(f"  --no-baselines: {args.no_baselines}")
     if not args.no_baselines:

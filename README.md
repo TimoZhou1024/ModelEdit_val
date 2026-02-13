@@ -78,6 +78,12 @@ E:\ModelEdit_val\
 ├── dataset/                          # Liver Fibrosis data (MERIT paper)
 │   ├── imgs.npy                     # Images (703 samples, 256x256x1)
 │   └── labs.npy                     # Labels (0-3)
+├── scripts/
+│   ├── verify_checkpoint.py       # Cross-platform checkpoint consistency verification
+│   ├── param_search.py            # Parameter grid search
+│   ├── collect_results.py         # Aggregate experiment results
+│   ├── run_all_baselines.py       # Batch baseline experiments
+│   └── wandb_sweep.py             # W&B sweep agent
 ├── pyproject.toml                   # uv package configuration
 └── README.md
 ```
@@ -344,7 +350,7 @@ Checkpoints are namespaced by model: `{model}_{dataset}_finetuned.pt` (e.g., `vi
 | `--projection-samples` | 500 | Number of FT-Train samples for projection matrix construction |
 | `--nullspace-threshold` | 1e-2 | Threshold for null-space eigenvalue selection |
 | `--v-grad-steps` | 25 | Gradient steps for AlphaEdit target vector optimization |
-| `--batch-edit` | False | Batch all edit samples into one call (faster GPU utilization, higher memory) |
+| `--edit-batch-size` | 1 | Samples per edit batch: 1=sequential, N=chunked (paper uses 100), 0/all=all at once |
 
 ### Head Editing Options
 | Argument | Default | Description |
@@ -741,6 +747,60 @@ The following parameters are currently fixed at default values but could be expl
 
 These parameters affect various aspects of the pipeline but are less likely to significantly impact the core editing effectiveness compared to the primary search dimensions.
 
+## Checkpoint Consistency Verification
+
+When running the pipeline across multiple platforms, checkpoints are manually copied (not synced via git). Use `scripts/verify_checkpoint.py` to verify that checkpoints on different platforms are identical.
+
+### Usage
+
+```bash
+# Verify finetuned checkpoint on each platform, then compare outputs
+uv run python scripts/verify_checkpoint.py --dataset pathmnist --model vit-base
+
+# Verify edited checkpoint
+uv run python scripts/verify_checkpoint.py --dataset pathmnist --checkpoint-type edited
+
+# Verify arbitrary checkpoint file
+uv run python scripts/verify_checkpoint.py --dataset pathmnist --checkpoint-path path/to/model.pt
+
+# Multiple runs with deterministic mode (test GPU reproducibility)
+uv run python scripts/verify_checkpoint.py --dataset pathmnist --deterministic --num-runs 3
+
+# Liver dataset (requires --data-path)
+uv run python scripts/verify_checkpoint.py --dataset liver4 --data-path dataset/
+
+# Custom output path
+uv run python scripts/verify_checkpoint.py --dataset pathmnist --output verify_platformA.json
+```
+
+### Three-Level Verification
+
+| Level | Metric | Meaning |
+|-------|--------|---------|
+| File-level | `file_hash` (SHA256) | Byte-identical .pt files |
+| Weight-level | `weight_hash` (SHA256) | Numerically identical model parameters (tolerates different PyTorch serialization versions) |
+| Functional-level | `prediction_hash` + `accuracy` | Identical inference behavior on test set |
+
+### Cross-Platform Workflow
+
+1. Run the script on Platform A and Platform B with the same arguments
+2. Compare the `COMPARE_THESE` block printed at the end:
+
+```
+--- CROSS-PLATFORM COMPARISON BLOCK ---
+file_hash:       a1b2c3d4...
+weight_hash:     e5f6g7h8...
+prediction_hash: i9j0k1l2...
+accuracy:        89.1234%
+--- END ---
+```
+
+- `file_hash` match → files are byte-identical
+- `weight_hash` match → model weights are numerically identical (even if file format differs)
+- `prediction_hash` match → models produce identical predictions on every test sample
+
+Full results are saved as JSON (default: `results/verify_{model}_{dataset}_{type}.json`) including platform info, per-class accuracy, and per-run details.
+
 ## W&B Integration
 
 This project supports [Weights & Biases](https://wandb.ai/) for experiment tracking and hyperparameter sweeps.
@@ -814,6 +874,15 @@ All experiments log these metrics to W&B:
 | `timing/edit_seconds` | Edit stage duration |
 
 ## Changelog
+
+### v1.12.0 (2026-02-13)
+- **Checkpoint Verification Script**: Added `scripts/verify_checkpoint.py` for cross-platform checkpoint consistency verification
+  - Three-level verification: file hash (SHA256), weight hash, prediction hash
+  - Runs inference on test set and reports accuracy, per-class accuracy, AUC
+  - Deterministic mode (`--deterministic`) for GPU reproducibility testing
+  - Multi-run support (`--num-runs`) to detect non-determinism
+  - JSON output with `COMPARE_THESE` block for easy cross-platform comparison
+  - Supports all checkpoint types (finetuned, edited, best, etc.) and all datasets
 
 ### v1.11.0 (2026-02-12)
 - **AUC Metric**: Added AUC (Area Under ROC Curve) alongside ACC across all evaluation functions
