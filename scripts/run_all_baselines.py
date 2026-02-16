@@ -1,8 +1,14 @@
 """
 Run All Baselines Script
 ========================
-Runs baseline1 and baseline2 on all MedMNIST datasets in parallel.
+Runs baseline1-4 on all MedMNIST datasets in parallel.
 Designed for multi-GPU environments (e.g., 8x 3090 GPUs).
+
+Baselines:
+    baseline1: Retrain from scratch with combined FT-Train + error samples
+    baseline2: Finetune on error samples only (no regularization)
+    baseline3: Finetune on errors with L2 regularization toward finetuned weights
+    baseline4: Finetune on errors with EWC (Elastic Weight Consolidation)
 
 Usage:
     python scripts/run_all_baselines.py --num-gpus 8
@@ -33,7 +39,7 @@ ALL_DATASETS = [
 ]
 
 # Baseline configurations
-BASELINES = ["baseline1", "baseline2"]
+BASELINES = ["baseline1", "baseline2", "baseline3", "baseline4"]
 
 
 def run_job(job_config: dict) -> dict:
@@ -76,6 +82,15 @@ def run_job(job_config: dict) -> dict:
         cmd.extend(["--baseline-lr", str(baseline_lr)])
         if baseline2_batch_size is not None:
             cmd.extend(["--baseline2-batch-size", str(baseline2_batch_size)])
+
+    if baseline == "baseline3":
+        cmd.extend(["--baseline-lr", str(baseline_lr)])
+        cmd.extend(["--l2-lambda", str(job_config.get("l2_lambda", 0.01))])
+
+    if baseline == "baseline4":
+        cmd.extend(["--baseline-lr", str(baseline_lr)])
+        cmd.extend(["--ewc-lambda", str(job_config.get("ewc_lambda", 1000.0))])
+        cmd.extend(["--fisher-samples", str(job_config.get("fisher_samples", 500))])
 
     start_time = time.time()
     job_name = f"{dataset}_{baseline}"
@@ -165,7 +180,7 @@ def main():
         nargs="+",
         default=BASELINES,
         choices=BASELINES,
-        help="Baselines to run (default: both)"
+        help="Baselines to run (default: all four)"
     )
     parser.add_argument(
         "--baseline-epochs",
@@ -209,6 +224,24 @@ def main():
         default=None,
         help="Batch size for baseline2 finetuning on errors (default: same as --batch-size)"
     )
+    parser.add_argument(
+        "--l2-lambda",
+        type=float,
+        default=0.01,
+        help="L2 regularization strength for baseline3 (default: 0.01)"
+    )
+    parser.add_argument(
+        "--ewc-lambda",
+        type=float,
+        default=1000.0,
+        help="EWC regularization strength for baseline4 (default: 1000.0)"
+    )
+    parser.add_argument(
+        "--fisher-samples",
+        type=int,
+        default=500,
+        help="Number of samples for Fisher computation in baseline4 (default: 500)"
+    )
 
     args = parser.parse_args()
 
@@ -230,6 +263,9 @@ def main():
                 "baseline_lr": args.baseline_lr,
                 "max_edits": args.max_edits,
                 "baseline2_batch_size": args.baseline2_batch_size,
+                "l2_lambda": args.l2_lambda,
+                "ewc_lambda": args.ewc_lambda,
+                "fisher_samples": args.fisher_samples,
                 "gpu_id": None  # Will be assigned later
             })
 
@@ -268,6 +304,13 @@ def main():
                 cmd.extend(["--baseline-lr", str(job["baseline_lr"])])
                 if job["baseline2_batch_size"] is not None:
                     cmd.extend(["--baseline2-batch-size", str(job["baseline2_batch_size"])])
+            if job["baseline"] == "baseline3":
+                cmd.extend(["--baseline-lr", str(job["baseline_lr"])])
+                cmd.extend(["--l2-lambda", str(job["l2_lambda"])])
+            if job["baseline"] == "baseline4":
+                cmd.extend(["--baseline-lr", str(job["baseline_lr"])])
+                cmd.extend(["--ewc-lambda", str(job["ewc_lambda"])])
+                cmd.extend(["--fisher-samples", str(job["fisher_samples"])])
 
             print(f"\n  CUDA_VISIBLE_DEVICES={job['gpu_id']} {' '.join(cmd)}")
         return

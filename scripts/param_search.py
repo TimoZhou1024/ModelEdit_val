@@ -251,7 +251,7 @@ def parse_args():
     parser.add_argument(
         "--no-baselines",
         action="store_true",
-        help="Disable running baseline comparisons (baseline1: retrain, baseline2: finetune-errors)"
+        help="Disable running baseline comparisons (baseline1-4: retrain, finetune-errors, l2reg, ewc)"
     )
 
     parser.add_argument(
@@ -272,6 +272,24 @@ def parse_args():
         type=int,
         default=None,
         help="Batch size for baseline2 finetuning on errors (default: same as main --batch-size)"
+    )
+    parser.add_argument(
+        "--l2-lambda",
+        type=float,
+        default=0.01,
+        help="L2 regularization strength for baseline3 (default: 0.01)"
+    )
+    parser.add_argument(
+        "--ewc-lambda",
+        type=float,
+        default=1000.0,
+        help="EWC regularization strength for baseline4 (default: 1000.0)"
+    )
+    parser.add_argument(
+        "--fisher-samples",
+        type=int,
+        default=500,
+        help="Number of samples for Fisher computation in baseline4 (default: 500)"
     )
     parser.add_argument(
         "--v-grad-steps-range",
@@ -564,7 +582,13 @@ def get_unique_baseline_keys(configs: List[Dict[str, Any]]) -> List[Tuple[str, i
 
 def build_baseline_run_name(dataset: str, max_edits: int, baseline_type: str) -> str:
     """Build run name for a baseline experiment."""
-    name = "retrain" if baseline_type == "baseline1" else "finetune_errors"
+    name_map = {
+        "baseline1": "retrain",
+        "baseline2": "finetune_errors",
+        "baseline3": "l2reg",
+        "baseline4": "ewc",
+    }
+    name = name_map.get(baseline_type, baseline_type)
     return f"{dataset}/baseline_{name}_edit{max_edits}"
 
 
@@ -576,13 +600,19 @@ def run_baseline_worker(
     args,
     gpu_id: Optional[int] = None
 ) -> Dict[str, Any]:
-    """Run a single baseline experiment (baseline1 or baseline2).
+    """Run a single baseline experiment (baseline1-4).
 
     Returns an experiment record with the same structure as alphaedit experiments,
     so baselines can appear as separate rows in the summary CSV.
     """
     run_name = build_baseline_run_name(dataset, max_edits, baseline_type)
-    method = "baseline_retrain" if baseline_type == "baseline1" else "baseline_finetune"
+    method_map = {
+        "baseline1": "baseline_retrain",
+        "baseline2": "baseline_finetune",
+        "baseline3": "baseline_l2reg",
+        "baseline4": "baseline_ewc",
+    }
+    method = method_map.get(baseline_type, baseline_type)
 
     cmd = [
         sys.executable,
@@ -608,6 +638,15 @@ def run_baseline_worker(
         if args.baseline2_batch_size is not None:
             cmd.extend(["--baseline2-batch-size", str(args.baseline2_batch_size)])
 
+    if baseline_type == "baseline3":
+        cmd.extend(["--baseline-lr", str(args.baseline_lr)])
+        cmd.extend(["--l2-lambda", str(args.l2_lambda)])
+
+    if baseline_type == "baseline4":
+        cmd.extend(["--baseline-lr", str(args.baseline_lr)])
+        cmd.extend(["--ewc-lambda", str(args.ewc_lambda)])
+        cmd.extend(["--fisher-samples", str(args.fisher_samples)])
+
     # Create config dict similar to alphaedit experiments (with baseline-specific fields)
     config = {
         'dataset': dataset,
@@ -620,7 +659,7 @@ def run_baseline_worker(
         'max_edits': max_edits,
         'max_samples': None,
         'baseline_epochs': args.baseline_epochs,
-        'baseline_lr': args.baseline_lr if baseline_type == "baseline2" else None,
+        'baseline_lr': args.baseline_lr if baseline_type in ("baseline2", "baseline3", "baseline4") else None,
     }
 
     record = {
@@ -649,7 +688,13 @@ def run_baseline_worker(
     if gpu_id is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-    bl_label = "RETRAIN" if baseline_type == "baseline1" else "FINETUNE-ERRORS"
+    bl_label_map = {
+        "baseline1": "RETRAIN",
+        "baseline2": "FINETUNE-ERRORS",
+        "baseline3": "L2-REG",
+        "baseline4": "EWC",
+    }
+    bl_label = bl_label_map.get(baseline_type, baseline_type.upper())
     print(f"\n{'='*70}")
     print(f"BASELINE {exp_idx} ({bl_label}): {run_name}")
     print(f"{'='*70}")
@@ -1002,7 +1047,8 @@ def main():
 
     if not args.no_baselines:
         baseline_keys = get_unique_baseline_keys(configs_to_run)
-        total_baseline_runs = len(baseline_keys) * 2  # baseline1 + baseline2 for each key
+        baseline_types = ["baseline1", "baseline2", "baseline3", "baseline4"]
+        total_baseline_runs = len(baseline_keys) * len(baseline_types)
         print(f"\n{'='*70}")
         print(f"PHASE 1: RUNNING BASELINES ({len(baseline_keys)} unique (dataset, max_edits) pairs, {total_baseline_runs} runs)")
         print(f"{'='*70}")
@@ -1010,18 +1056,13 @@ def main():
         for i, (dataset, max_edits) in enumerate(baseline_keys):
             gpu_id = gpu_ids[0] if gpu_ids and gpu_ids[0] is not None else None
 
-            # Run baseline1 (retrain)
-            print(f"\n[{i+1}/{len(baseline_keys)}] Baseline for {dataset}, max_edits={max_edits}")
-            bl1 = run_baseline_worker(next_exp_idx, dataset, max_edits, "baseline1", args, gpu_id)
-            experiments.append(bl1)
-            next_exp_idx += 1
+            print(f"\n[{i+1}/{len(baseline_keys)}] Baselines for {dataset}, max_edits={max_edits}")
+            for baseline_type in baseline_types:
+                bl = run_baseline_worker(next_exp_idx, dataset, max_edits, baseline_type, args, gpu_id)
+                experiments.append(bl)
+                next_exp_idx += 1
 
-            # Run baseline2 (finetune-errors)
-            bl2 = run_baseline_worker(next_exp_idx, dataset, max_edits, "baseline2", args, gpu_id)
-            experiments.append(bl2)
-            next_exp_idx += 1
-
-            # Save intermediate results after each baseline pair
+            # Save intermediate results after each baseline group
             summary_path = output_dir / f"param_search_summary_{args.datasets[0]}.csv"
             save_summary_csv(experiments, summary_path)
 

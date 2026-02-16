@@ -33,7 +33,7 @@ Transfer LLM editing techniques (AlphaEdit + ASTRA) to Vision Transformers for c
 2. **Fine-tuning**: Train ViT model on FT-Train set (supports `vit-base-patch16-224` and `vit-tiny-patch16-224`)
 3. **Locate Layers**: Use **ASTRA-style Causal Tracing** on Edit-Discovery set to identify significant layers
 4. **Edit Weights**: Apply **AlphaEdit** (MLP layers) or **Head Editing** (classifier only) to correct errors
-5. **Baselines**: Compare with traditional approaches (Retrain, Finetune-on-Errors)
+5. **Baselines**: Compare with traditional approaches (Retrain, Finetune-on-Errors, FT+L2 Reg, EWC)
 6. **Evaluate**: Run **Comparative Evaluation** on Official Test Set (Pre-Edit vs Post-Edit)
 
 ## Project Structure
@@ -53,6 +53,8 @@ E:\ModelEdit_val\
 │   ├── {model}_{dataset}_head_edited.pt   # Head edited model
 │   ├── {model}_{dataset}_retrained.pt     # Baseline 1: Retrained model
 │   ├── {model}_{dataset}_finetuned_on_errors.pt  # Baseline 2: Finetuned on errors
+│   ├── {model}_{dataset}_l2reg.pt               # Baseline 3: FT + L2 Reg
+│   ├── {model}_{dataset}_ewc.pt                 # Baseline 4: EWC
 │   └── projection_cache.pt            # Cached null-space projections
 ├── logs/
 │   └── {timestamp}/                 # Timestamped run logs
@@ -70,7 +72,9 @@ E:\ModelEdit_val\
 │       ├── confusion_matrix_edit.csv   # Post-edit confusion matrix
 │       ├── confusion_matrix.png        # Visualization
 │       ├── baseline_retrain_summary.csv      # Baseline 1 results
-│       └── baseline_finetune_errors_summary.csv  # Baseline 2 results
+│       ├── baseline_finetune_errors_summary.csv  # Baseline 2 results
+│       ├── baseline_l2reg_summary.csv        # Baseline 3 results
+│       └── baseline_ewc_summary.csv          # Baseline 4 results
 ├── reference/                        # Reference implementations
 │   ├── AlphaEdit/                   # Null-space projection method
 │   ├── ASTRA/                       # Activation steering method
@@ -259,7 +263,7 @@ Runs **Comparative Evaluation** on **Official Test Set** (4-Set Protocol):
 
 ### Baseline Methods
 
-Two baseline methods are provided for comparison with AlphaEdit:
+Four baseline methods are provided for comparison with AlphaEdit:
 
 #### Baseline 1: Retrain from Scratch (`--stage baseline1`)
 
@@ -286,9 +290,38 @@ Load the finetuned model and continue training ONLY on error samples.
 
 **Use Case:** Tests whether targeted finetuning on errors helps without full retraining.
 
+#### Baseline 3: FT + L2 Regularization (`--stage baseline3`)
+
+Load the finetuned model and finetune on error samples with L2 penalty toward original weights.
+
+**Loss:** `CE_loss + l2_lambda * ||θ - θ_original||²`
+
+**Process:**
+1. Load finetuned model checkpoint and store original weights as anchor
+2. Create dataset with only error samples
+3. Finetune with L2 regularization penalizing deviation from original weights
+4. Run 4-level evaluation comparing original vs regularized model
+
+**Use Case:** Tests whether simple weight regularization prevents catastrophic forgetting during error correction.
+
+#### Baseline 4: EWC — Elastic Weight Consolidation (`--stage baseline4`)
+
+Load the finetuned model, compute Fisher Information on FT-Train, then finetune on error samples with Fisher-weighted L2 penalty.
+
+**Loss:** `CE_loss + ewc_lambda * Σᵢ(Fᵢ * (θᵢ - θ_originalᵢ)²)`
+
+**Process:**
+1. Load finetuned model checkpoint
+2. Compute diagonal Fisher Information matrix on FT-Train (4-Set Protocol)
+3. Store original weights as anchor
+4. Finetune on error samples with EWC-regularized loss
+5. Run 4-level evaluation comparing original vs EWC model
+
+**Use Case:** Tests whether Fisher-weighted regularization (common in continual learning) better preserves important parameters during error correction.
+
 #### 4-Level Evaluation (Same as AlphaEdit)
 
-Both baselines use the same evaluation framework:
+All four baselines use the same evaluation framework:
 
 | Level | Dataset | Purpose |
 |-------|---------|---------|
@@ -302,7 +335,7 @@ Both baselines use the same evaluation framework:
 ### Stage Selection
 | Argument | Description |
 |----------|-------------|
-| `--stage` | Pipeline stage: `data`, `train`, `locate`, `edit`, `eval`, `full`, `baseline1`, `baseline2` |
+| `--stage` | Pipeline stage: `data`, `train`, `locate`, `edit`, `eval`, `full`, `baseline1`, `baseline2`, `baseline3`, `baseline4` |
 
 ### Dataset Selection
 | Argument | Default | Description |
@@ -364,8 +397,11 @@ Checkpoints are namespaced by model: `{model}_{dataset}_finetuned.pt` (e.g., `vi
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--baseline-epochs` | 10 | Number of epochs for baseline training |
-| `--baseline-lr` | 1e-5 | Learning rate for baseline finetuning (Baseline 2) |
-| `--baseline2-batch-size` | same as `--batch-size` | Batch size for baseline2 finetuning (set to 1 for per-sample comparison with AlphaEdit) |
+| `--baseline-lr` | 1e-5 | Learning rate for baseline finetuning (Baseline 2/3/4) |
+| `--baseline2-batch-size` | same as `--batch-size` | Batch size for baseline2/3/4 finetuning (set to 1 for per-sample comparison with AlphaEdit) |
+| `--l2-lambda` | 0.01 | L2 regularization strength toward finetuned weights (Baseline 3) |
+| `--ewc-lambda` | 1000.0 | EWC regularization strength (Baseline 4, also used by HeadEditor) |
+| `--fisher-samples` | 500 | Number of FT-Train samples for Fisher Information computation (Baseline 4) |
 
 ### Output Options
 | Argument | Default | Description |
@@ -436,10 +472,18 @@ uv run python src/main.py --stage baseline1 --dataset pathmnist --baseline-epoch
 # Baseline 2: Finetune on error samples only
 uv run python src/main.py --stage baseline2 --dataset pathmnist --baseline-epochs 5 --baseline-lr 1e-5 --max-edits 30
 
+# Baseline 3: Finetune on errors with L2 regularization toward finetuned weights
+uv run python src/main.py --stage baseline3 --dataset pathmnist --baseline-epochs 5 --baseline-lr 1e-5 --l2-lambda 0.01 --max-edits 30
+
+# Baseline 4: Finetune on errors with EWC (Elastic Weight Consolidation)
+uv run python src/main.py --stage baseline4 --dataset pathmnist --baseline-epochs 5 --baseline-lr 1e-5 --ewc-lambda 1000.0 --fisher-samples 500 --max-edits 30
+
 # Compare all methods on same dataset
 uv run python src/main.py --stage full --dataset pathmnist --run-name alphaedit_exp
 uv run python src/main.py --stage baseline1 --dataset pathmnist --run-name baseline1_exp
 uv run python src/main.py --stage baseline2 --dataset pathmnist --run-name baseline2_exp
+uv run python src/main.py --stage baseline3 --dataset pathmnist --run-name baseline3_exp
+uv run python src/main.py --stage baseline4 --dataset pathmnist --run-name baseline4_exp
 
 # === Compare Methods Across Datasets ===
 uv run python src/main.py --stage full --dataset dermamnist --edit-method alphaedit --run-name derma_alpha
@@ -611,18 +655,23 @@ uv run python scripts/collect_results.py --results-dir results
 
 ### Baseline Comparison
 
-Each AlphaEdit experiment can be automatically compared with two baseline methods:
+Each AlphaEdit experiment can be automatically compared with four baseline methods:
 
 | Parameter | CLI Argument | Default | Description |
 |-----------|--------------|---------|-------------|
 | Disable Baselines | `--no-baselines` | False | Skip baseline comparisons |
 | Baseline Epochs | `--baseline-epochs` | `10` | Training epochs for baselines |
-| Baseline LR | `--baseline-lr` | `1e-5` | Learning rate for baseline2 (finetune-errors) |
-| Baseline2 Batch Size | `--baseline2-batch-size` | None | Batch size for baseline2 finetuning |
+| Baseline LR | `--baseline-lr` | `1e-5` | Learning rate for baseline2/3/4 (finetune-based) |
+| Baseline2 Batch Size | `--baseline2-batch-size` | None | Batch size for baseline2/3/4 finetuning |
+| L2 Lambda | `--l2-lambda` | `0.01` | L2 regularization strength for baseline3 |
+| EWC Lambda | `--ewc-lambda` | `1000.0` | EWC regularization strength for baseline4 |
+| Fisher Samples | `--fisher-samples` | `500` | Samples for Fisher computation in baseline4 |
 
 **Baseline Methods:**
 - **Baseline 1 (Retrain)**: Add error samples to FT-Train, train new model from scratch
 - **Baseline 2 (Finetune-Errors)**: Continue finetuning existing model on error samples only
+- **Baseline 3 (L2 Reg)**: Finetune on errors with L2 penalty toward original finetuned weights
+- **Baseline 4 (EWC)**: Finetune on errors with Fisher-weighted L2 penalty (Elastic Weight Consolidation)
 
 **Deduplication:** Baselines only depend on `(dataset, max_edits)`, so they run once per unique combination regardless of projection_samples, nullspace_threshold, or layer configuration.
 
@@ -642,13 +691,19 @@ results/{dataset}/
 │   └── timing.csv                               # duration_seconds/edit_seconds
 ├── baseline_retrain_edit{M}/                     # Baseline 1 results
 │   └── baseline_retrain_summary.csv
-└── baseline_finetune_errors_edit{M}/             # Baseline 2 results
-    └── baseline_finetune_errors_summary.csv
+├── baseline_finetune_errors_edit{M}/             # Baseline 2 results
+│   └── baseline_finetune_errors_summary.csv
+├── baseline_l2reg_edit{M}/                       # Baseline 3 results
+│   └── baseline_l2reg_summary.csv
+└── baseline_ewc_edit{M}/                         # Baseline 4 results
+    └── baseline_ewc_summary.csv
 ```
 
 **CSV Structure:** Each experiment (baseline or alphaedit) occupies its own row with a `method` column:
 - `baseline_retrain`: Baseline 1 (retrain from scratch)
 - `baseline_finetune`: Baseline 2 (finetune on errors)
+- `baseline_l2reg`: Baseline 3 (FT + L2 regularization)
+- `baseline_ewc`: Baseline 4 (EWC)
 - `alphaedit`: AlphaEdit experiments
 
 ### Core Metrics
@@ -875,6 +930,15 @@ All experiments log these metrics to W&B:
 
 ## Changelog
 
+### v1.13.0 (2026-02-14)
+- **New Baselines**: Added two regularization-based baselines for comparison with AlphaEdit
+  - **Baseline 3 (FT + L2 Reg)** (`--stage baseline3`): Finetune on error samples with L2 penalty toward original finetuned weights. Loss: `CE + l2_lambda * ||θ - θ_original||²`
+  - **Baseline 4 (EWC)** (`--stage baseline4`): Finetune on error samples with Elastic Weight Consolidation. Computes diagonal Fisher Information on FT-Train, then applies Fisher-weighted L2 penalty. Loss: `CE + ewc_lambda * Σ(F_i * (θ_i - θ_original_i)²)`
+- **Trainer Regularizer Framework**: Added `regularizer` callback attribute to Trainer class, enabling custom loss terms without duplicating the training loop
+- **New CLI Arguments**: `--l2-lambda` (default 0.01), `--fisher-samples` (default 500); reuses existing `--ewc-lambda` (default 1000.0)
+- **New Trainer Methods**: `finetune_with_l2_reg()`, `finetune_with_ewc()`, `compute_fisher_information_full()`
+- **Scripts Updated**: `param_search.py`, `run_all_baselines.py`, `collect_results.py` all support baseline3/baseline4
+
 ### v1.12.0 (2026-02-13)
 - **Checkpoint Verification Script**: Added `scripts/verify_checkpoint.py` for cross-platform checkpoint consistency verification
   - Three-level verification: file hash (SHA256), weight hash, prediction hash
@@ -935,7 +999,7 @@ All experiments log these metrics to W&B:
   - `scripts/collect_results.py`: New script to aggregate metrics from completed experiments
 - **Automatic Baseline Comparison**: Each experiment automatically runs baseline comparisons
   - Baseline 1 (retrain) and Baseline 2 (finetune-errors) run once per unique (dataset, max_edits)
-  - Baselines appear as **separate rows** in summary CSV with `method` column (`baseline_retrain`, `baseline_finetune`, `alphaedit`)
+  - Baselines appear as **separate rows** in summary CSV with `method` column (`baseline_retrain`, `baseline_finetune`, `baseline_l2reg`, `baseline_ewc`, `alphaedit`)
   - `--no-baselines`: Skip baseline comparisons for faster iteration
   - `--baseline-epochs`, `--baseline-lr`: Configure baseline training
 - **Multi-GPU Parallel Execution**: Run experiments in parallel across multiple GPUs
@@ -962,7 +1026,7 @@ All experiments log these metrics to W&B:
 - **Baseline Methods**: Added two baseline methods for comparison with AlphaEdit
   - **Baseline 1 (Retrain)**: Add error samples to FT-Train, train from scratch
   - **Baseline 2 (Finetune-Errors)**: Finetune existing model on error samples only
-- **4-Level Evaluation**: Both baselines use same evaluation framework as AlphaEdit
+- **4-Level Evaluation**: All baselines use same evaluation framework as AlphaEdit
   - Edit Samples, FT-Train Samples, Test Set, Edit-Discovery Set
 - **New CLI stages**: `--stage baseline1`, `--stage baseline2`
 - **New arguments**: `--baseline-epochs`, `--baseline-lr`
