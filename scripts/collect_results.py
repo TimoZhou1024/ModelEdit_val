@@ -97,6 +97,8 @@ def parse_run_name(run_name: str) -> Dict[str, Any]:
         {dataset}/proj{N}_edit{M}_fixed{L1-L2-L3}_thresh{T}   -> AlphaEdit (fixed)
         {dataset}/baseline_retrain_edit{M}                     -> Baseline1 (retrain)
         {dataset}/baseline_finetune_errors_edit{M}             -> Baseline2 (finetune)
+        {dataset}/baseline_l2reg_edit{M}                       -> Baseline3 (L2 reg)
+        {dataset}/baseline_ewc_edit{M}                         -> Baseline4 (EWC)
 
     Returns dict with: dataset, method, mode, projection_samples, max_edits,
                        num_edit_layers or edit_layers, nullspace_threshold
@@ -144,6 +146,28 @@ def parse_run_name(run_name: str) -> Dict[str, Any]:
         config['method'] = 'baseline_finetune'
         config['mode'] = 'baseline'
         config['max_edits'] = int(baseline_finetune.group(1))
+        config['num_edit_layers'] = None
+        config['edit_layers'] = None
+        config['projection_samples'] = None
+        config['nullspace_threshold'] = None
+        return config
+
+    baseline_l2reg = re.search(r'baseline_l2reg_edit(\d+)', config_str)
+    if baseline_l2reg:
+        config['method'] = 'baseline_l2reg'
+        config['mode'] = 'baseline'
+        config['max_edits'] = int(baseline_l2reg.group(1))
+        config['num_edit_layers'] = None
+        config['edit_layers'] = None
+        config['projection_samples'] = None
+        config['nullspace_threshold'] = None
+        return config
+
+    baseline_ewc = re.search(r'baseline_ewc_edit(\d+)', config_str)
+    if baseline_ewc:
+        config['method'] = 'baseline_ewc'
+        config['mode'] = 'baseline'
+        config['max_edits'] = int(baseline_ewc.group(1))
         config['num_edit_layers'] = None
         config['edit_layers'] = None
         config['projection_samples'] = None

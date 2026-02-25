@@ -91,6 +91,10 @@ class Trainer:
         self.best_acc = 0.0
         self.training_history = []
 
+        # Optional regularizer callable (for L2/EWC baselines)
+        # When set, train_epoch() adds regularizer() to the loss
+        self.regularizer = None
+
         # Checkpoint naming (includes dataset name)
         self.checkpoint_name = f"{self.model_short}_{self.dataset_name}_finetuned.pt"
         self.best_checkpoint_name = f"{self.model_short}_{self.dataset_name}_best.pt"
@@ -203,7 +207,11 @@ class Trainer:
             
             # Compute loss
             loss = self.criterion(logits, labels)
-            
+
+            # Add regularization term if set (for L2 reg / EWC baselines)
+            if self.regularizer is not None:
+                loss = loss + self.regularizer()
+
             # Backward pass
             loss.backward()
             self.optimizer.step()
@@ -646,6 +654,238 @@ class Trainer:
             epochs=epochs,
             learning_rate=learning_rate
         )
+
+    def finetune_with_l2_reg(
+        self,
+        finetune_loader: DataLoader,
+        val_loader: DataLoader,
+        epochs: int = 5,
+        learning_rate: float = 1e-5,
+        l2_lambda: float = 0.01,
+        checkpoint_suffix: str = "l2reg"
+    ) -> Dict[str, Any]:
+        """
+        Finetune with L2 regularization toward original finetuned weights (Baseline 3).
+
+        Loss: CE_loss + l2_lambda * ||theta - theta_original||^2
+
+        This penalizes deviation from the finetuned checkpoint weights,
+        NOT toward zero (which would be standard weight_decay).
+
+        Args:
+            finetune_loader: DataLoader with samples to finetune on
+            val_loader: Validation data loader
+            epochs: Number of finetuning epochs
+            learning_rate: Learning rate
+            l2_lambda: L2 regularization strength toward original weights
+            checkpoint_suffix: Suffix for checkpoint filename
+
+        Returns:
+            Training results dictionary
+        """
+        # Load existing finetuned model
+        finetuned_path = self.checkpoint_dir / f"{self.model_short}_{self.dataset_name}_finetuned.pt"
+        if not finetuned_path.exists():
+            raise FileNotFoundError(
+                f"Finetuned model not found: {finetuned_path}. "
+                f"Run --stage train first."
+            )
+
+        print(f"\nLoading finetuned model from: {finetuned_path}")
+        self.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
+
+        # Store original weights (deep copy)
+        original_state = {
+            name: param.data.clone()
+            for name, param in self.model.named_parameters()
+            if param.requires_grad
+        }
+        device = self.device
+
+        # Set up L2 regularizer toward original weights
+        def l2_regularizer():
+            l2_loss = torch.tensor(0.0, device=device)
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and name in original_state:
+                    l2_loss = l2_loss + ((param - original_state[name]) ** 2).sum()
+            return l2_lambda * l2_loss
+
+        self.regularizer = l2_regularizer
+
+        # Update checkpoint name
+        self.checkpoint_name = f"{self.model_short}_{self.dataset_name}_{checkpoint_suffix}.pt"
+        self.best_checkpoint_name = (
+            f"{self.model_short}_{self.dataset_name}_{checkpoint_suffix}_best.pt"
+        )
+
+        # Reset training state (but keep model weights)
+        self.current_epoch = 0
+        self.best_acc = 0.0
+        self.training_history = []
+
+        # Train with regularized loss
+        try:
+            results = self.train(
+                train_loader=finetune_loader,
+                val_loader=val_loader,
+                epochs=epochs,
+                learning_rate=learning_rate
+            )
+        finally:
+            self.regularizer = None
+
+        return results
+
+    def compute_fisher_information_full(
+        self,
+        stats_loader: DataLoader,
+        num_samples: int = 500
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute diagonal Fisher Information Matrix for ALL model parameters.
+
+        IMPORTANT (4-Set Protocol): stats_loader MUST be FT-Train loader.
+
+        Pattern adapted from HeadEditor.compute_fisher_information() in editor.py.
+        Extended from classifier-only to full model.
+
+        Args:
+            stats_loader: FT-Train DataLoader
+            num_samples: Number of samples for Fisher estimation
+
+        Returns:
+            Dictionary mapping parameter names to diagonal Fisher values
+        """
+        print(f"\nComputing full-model Fisher information from {num_samples} samples...")
+        self.model.eval()
+
+        fisher = {
+            name: torch.zeros_like(param)
+            for name, param in self.model.named_parameters()
+            if param.requires_grad
+        }
+
+        count = 0
+        for images, labels in tqdm(stats_loader, desc="Computing Fisher"):
+            if count >= num_samples:
+                break
+
+            images = images.to(self.device)
+            labels = labels.to(self.device)
+
+            self.model.zero_grad()
+            outputs = self.model(images)
+
+            log_probs = torch.log_softmax(outputs.logits, dim=1)
+            loss = nn.functional.nll_loss(log_probs, labels)
+            loss.backward()
+
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and param.grad is not None:
+                    fisher[name] += param.grad.data ** 2
+
+            count += images.shape[0]
+
+        # Normalize by sample count
+        for name in fisher:
+            fisher[name] /= count
+
+        total_fisher_norm = sum(f.norm().item() for f in fisher.values())
+        print(f"  Fisher computed for {len(fisher)} parameters (total norm: {total_fisher_norm:.4f})")
+
+        return fisher
+
+    def finetune_with_ewc(
+        self,
+        finetune_loader: DataLoader,
+        val_loader: DataLoader,
+        ft_train_loader: DataLoader,
+        epochs: int = 5,
+        learning_rate: float = 1e-5,
+        ewc_lambda: float = 1000.0,
+        fisher_samples: int = 500,
+        checkpoint_suffix: str = "ewc"
+    ) -> Dict[str, Any]:
+        """
+        Finetune with EWC regularization (Baseline 4).
+
+        Loss: CE_loss + ewc_lambda * sum_i(F_i * (theta_i - theta_original_i)^2)
+
+        1. Load finetuned model
+        2. Compute diagonal Fisher on FT-Train (4-Set Protocol)
+        3. Store original weights
+        4. Train with EWC-regularized loss
+
+        Args:
+            finetune_loader: DataLoader with samples to finetune on
+            val_loader: Validation data loader
+            ft_train_loader: FT-Train DataLoader (for Fisher computation, 4-Set Protocol)
+            epochs: Number of finetuning epochs
+            learning_rate: Learning rate
+            ewc_lambda: EWC regularization strength
+            fisher_samples: Number of samples for Fisher computation
+            checkpoint_suffix: Suffix for checkpoint filename
+
+        Returns:
+            Training results dictionary
+        """
+        # Load existing finetuned model
+        finetuned_path = self.checkpoint_dir / f"{self.model_short}_{self.dataset_name}_finetuned.pt"
+        if not finetuned_path.exists():
+            raise FileNotFoundError(
+                f"Finetuned model not found: {finetuned_path}. "
+                f"Run --stage train first."
+            )
+
+        print(f"\nLoading finetuned model from: {finetuned_path}")
+        self.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
+
+        # Compute Fisher information on FT-Train BEFORE any finetuning
+        fisher = self.compute_fisher_information_full(ft_train_loader, fisher_samples)
+
+        # Store original weights
+        original_state = {
+            name: param.data.clone()
+            for name, param in self.model.named_parameters()
+            if param.requires_grad
+        }
+        device = self.device
+
+        # Set up EWC regularizer
+        def ewc_regularizer():
+            ewc_loss = torch.tensor(0.0, device=device)
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and name in fisher:
+                    ewc_loss = ewc_loss + (
+                        fisher[name] * (param - original_state[name]) ** 2
+                    ).sum()
+            return ewc_lambda * ewc_loss
+
+        self.regularizer = ewc_regularizer
+
+        # Update checkpoint name
+        self.checkpoint_name = f"{self.model_short}_{self.dataset_name}_{checkpoint_suffix}.pt"
+        self.best_checkpoint_name = (
+            f"{self.model_short}_{self.dataset_name}_{checkpoint_suffix}_best.pt"
+        )
+
+        # Reset training state (but keep model weights)
+        self.current_epoch = 0
+        self.best_acc = 0.0
+        self.training_history = []
+
+        # Train with EWC-regularized loss
+        try:
+            results = self.train(
+                train_loader=finetune_loader,
+                val_loader=val_loader,
+                epochs=epochs,
+                learning_rate=learning_rate
+            )
+        finally:
+            self.regularizer = None
+
+        return results
 
 
 def main():
