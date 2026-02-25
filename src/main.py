@@ -53,6 +53,7 @@ from data_handler import MEDMNIST_INFO, get_data_handler
 from trainer import Trainer
 from locator import Locator
 from editor import Editor, AlphaEditHyperParams, HeadEditor, HeadEditHyperParams
+from lwe_baseline import run_lwe_baseline
 from evaluator import (
     Evaluator, evaluate_before_after, evaluate_comparative,
     evaluate_edit_samples, compare_edit_samples_before_after, print_edit_samples_comparison,
@@ -88,7 +89,7 @@ Examples:
         "--stage",
         type=str,
         required=True,
-        choices=["data", "train", "locate", "edit", "eval", "full", "baseline1", "baseline2"],
+        choices=["data", "train", "locate", "edit", "eval", "full", "baseline1", "baseline2", "baseline_lwe"],
         help="Pipeline stage to run"
     )
 
@@ -275,6 +276,72 @@ Examples:
         type=int,
         default=None,
         help="Batch size for baseline2 finetuning on errors (default: same as --batch-size)"
+    )
+    parser.add_argument(
+        "--lwe-method",
+        type=str,
+        choices=["ft", "hprd"],
+        default="ft",
+        help="Where-to-Edit baseline method (default: ft)"
+    )
+    parser.add_argument(
+        "--lwe-layer",
+        type=int,
+        default=None,
+        help="Center layer index for LWE editing. If unset, uses last 3 transformer layers"
+    )
+    parser.add_argument(
+        "--lwe-edit-lr",
+        type=float,
+        default=2e-5,
+        help="Editing learning rate for LWE methods (default: 2e-5)"
+    )
+    parser.add_argument(
+        "--lwe-max-steps",
+        type=int,
+        default=100,
+        help="Max edit optimization steps per sample (default: 100)"
+    )
+    parser.add_argument(
+        "--lwe-cloc",
+        type=float,
+        default=1.0,
+        help="Regularization weight for LWE-FT (default: 1.0)"
+    )
+    parser.add_argument(
+        "--lwe-l2-reg",
+        action="store_true",
+        help="Use L2 regularization in LWE-FT (default: L1)"
+    )
+    parser.add_argument(
+        "--lwe-sparsity",
+        type=float,
+        default=0.1,
+        help="Mask sparsity ratio for LWE-HPRD (default: 0.1)"
+    )
+    parser.add_argument(
+        "--lwe-hprd-epochs",
+        type=int,
+        default=3,
+        help="Training epochs for LWE-HPRD mask predictor when no checkpoint is provided"
+    )
+    parser.add_argument(
+        "--lwe-hprd-lr",
+        type=float,
+        default=1e-4,
+        help="Learning rate for LWE-HPRD mask predictor training (default: 1e-4)"
+    )
+    parser.add_argument(
+        "--lwe-hprd-max-batches",
+        type=int,
+        default=None,
+        help="Optional cap of batches per HPRD training epoch"
+    )
+    parser.add_argument(
+        "--lwe-hprd-ckpt",
+        type=str,
+        default=None,
+        help="Optional pretrained HPRD mask checkpoint path"
     )
 
     parser.add_argument(
@@ -874,7 +941,10 @@ def run_eval_stage(args, trainer=None, data_handler=None, edited_model=None):
     print("\n>>> EVALUATING ON OFFICIAL TEST SET <<<")
     print(">>> This set was NEVER used for training, validation, or editing <<<\n")
 
+    lwe_path = Path(args.checkpoint_dir) / f"{args.model_short}_{args.dataset}_lwe.pt"
     edited_path = Path(args.checkpoint_dir) / f"{args.model_short}_{args.dataset}_edited.pt"
+    if lwe_path.exists():
+        edited_path = lwe_path
     finetuned_path = Path(args.checkpoint_dir) / f"{args.model_short}_{args.dataset}_finetuned.pt"
 
     # Case A: have both edited and finetuned checkpoints -> comparative evaluation
@@ -1276,6 +1346,67 @@ def run_baseline2_stage(args):
     return baseline_results, edit_seconds
 
 
+def run_lwe_stage(args):
+    """Baseline LWE: FT/HPRD editing using discovery misclassified samples."""
+    print("\n" + "=" * 70)
+    print(f"BASELINE LWE ({args.lwe_method.upper()}) - {args.dataset.upper()}")
+    print("=" * 70)
+
+    data_handler = get_data_handler(
+        dataset_name=args.dataset,
+        data_path=args.data_path,
+        ft_train_ratio=args.ft_train_ratio,
+        random_seed=args.seed,
+        log_dir=args.log_dir
+    )
+    data_handler.load_data()
+    data_handler.create_resplit()
+
+    trainer = Trainer(
+        model_name=args.model_name,
+        model_short=args.model_short,
+        checkpoint_dir=args.checkpoint_dir,
+        log_dir=args.log_dir,
+        num_classes=data_handler.n_classes,
+        dataset_name=args.dataset,
+        n_channels=data_handler.n_channels
+    )
+    trainer.setup_model()
+
+    finetuned_path = Path(args.checkpoint_dir) / f"{args.model_short}_{args.dataset}_finetuned.pt"
+    if not finetuned_path.exists():
+        print(f"ERROR: Finetuned model not found at {finetuned_path}")
+        print("Please run --stage train first.")
+        return None, None
+    trainer.load_checkpoint(filepath=finetuned_path, load_optimizer=False)
+
+    transform = trainer.get_transforms()
+    dataloaders = data_handler.get_dataloaders(
+        batch_size=args.batch_size,
+        transform=transform,
+        pin_memory=args.pin_memory
+    )
+
+    print("\nFinding misclassified samples from Edit-Discovery set...")
+    misclassified = trainer.find_misclassified(
+        dataloaders['discovery'],
+        max_samples=args.max_edits
+    )
+
+    if len(misclassified['indices']) == 0:
+        print("No misclassified samples found!")
+        return None, None
+
+    edited_model, edit_seconds = run_lwe_baseline(
+        args=args,
+        trainer=trainer,
+        data_handler=data_handler,
+        dataloaders=dataloaders,
+        misclassified=misclassified,
+    )
+    return edited_model, edit_seconds
+
+
 def run_full_pipeline(args):
     """Run complete pipeline from start to finish (4-Set Protocol)."""
     print("\n" + "=" * 70)
@@ -1415,12 +1546,14 @@ def main():
         _, edit_seconds = run_baseline1_stage(args)
     elif args.stage == "baseline2":
         _, edit_seconds = run_baseline2_stage(args)
+    elif args.stage == "baseline_lwe":
+        _, edit_seconds = run_lwe_stage(args)
     else:
         print(f"Unknown stage: {args.stage}")
         sys.exit(1)
 
     duration_seconds = time.time() - start_time
-    if args.stage in {"edit", "full", "baseline1", "baseline2"}:
+    if args.stage in {"edit", "full", "baseline1", "baseline2", "baseline_lwe"}:
         export_timing_metrics(args.results_dir, duration_seconds, edit_seconds)
 
 

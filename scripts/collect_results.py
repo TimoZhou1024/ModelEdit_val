@@ -113,6 +113,19 @@ def parse_run_name(run_name: str) -> Dict[str, Any]:
         config['dataset'] = 'unknown'
         config_str = run_name
 
+    # Check for LWE experiment pattern (flat results folder)
+    lwe_match = re.search(r'^lwe_exp_([a-z0-9_]+)$', config_str)
+    if lwe_match:
+        config['dataset'] = lwe_match.group(1)
+        config['method'] = 'lwe'
+        config['mode'] = 'lwe'
+        config['max_edits'] = None
+        config['num_edit_layers'] = None
+        config['edit_layers'] = None
+        config['projection_samples'] = None
+        config['nullspace_threshold'] = None
+        return config
+
     # Check for baseline patterns first
     baseline_retrain = re.search(r'baseline_retrain_edit(\d+)', config_str)
     baseline_finetune = re.search(r'baseline_finetune_errors_edit(\d+)', config_str)
@@ -355,14 +368,16 @@ def find_experiment_dirs(results_dir: Path, datasets: Optional[List[str]] = None
 
             # Check if this directory has evaluation CSVs
             # AlphaEdit uses comparative_evaluation_edit_samples.csv
+            # LWE uses comparative_evaluation_test_set.csv only
             # Baselines use baseline_*_summary.csv
             has_alphaedit = (config_dir / "comparative_evaluation_edit_samples.csv").exists()
+            has_lwe = (config_dir / "comparative_evaluation_test_set.csv").exists()
             has_baseline = any(
                 f.name.startswith("baseline_") and f.name.endswith("_summary.csv")
                 for f in config_dir.iterdir() if f.is_file()
             )
 
-            if has_alphaedit or has_baseline:
+            if has_alphaedit or has_lwe or has_baseline:
                 experiment_dirs.append(config_dir)
 
     # Also check for flat layout: results/{config}/
@@ -375,12 +390,13 @@ def find_experiment_dirs(results_dir: Path, datasets: Optional[List[str]] = None
             continue
 
         has_alphaedit = (config_dir / "comparative_evaluation_edit_samples.csv").exists()
+        has_lwe = (config_dir / "comparative_evaluation_test_set.csv").exists()
         has_baseline = any(
             f.name.startswith("baseline_") and f.name.endswith("_summary.csv")
             for f in config_dir.iterdir() if f.is_file()
         )
 
-        if has_alphaedit or has_baseline:
+        if has_alphaedit or has_lwe or has_baseline:
             experiment_dirs.append(config_dir)
 
     return experiment_dirs
